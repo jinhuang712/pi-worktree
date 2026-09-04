@@ -72,11 +72,14 @@ Every turn, a short policy section is appended to the system prompt:
 - `CLEAN` plus an experimental, risky, or parallel task → proactively offer or call `worktree_create`.
 - `DIRTY` plus a new task → do not mix it into the dirty files; suggest `/worktree`.
 - Inside a linked child → keep all edits in that worktree and finish with `worktree_land`.
+- Worktrees are session-exclusive: only land links owned by this session (or unowned legacy links). Never land another session's active worktree without asking the user first.
 - Never run raw `git worktree add/remove` — use the tools so linkage stays consistent.
 
 ## Linkage
 
-Stored in `<git-common-dir>/pi-worktree.json`, which is shared across worktrees, plus session entries for the current branch view. Each link records origin path/branch/head, worktree path/branch/base, whether changes were carried, and a status of `active`, `landed`, or `removed`. Because the store lives in the repo rather than the session, `/land` works after `cd` into the new worktree and a fresh Pi session.
+Stored in `<git-common-dir>/pi-worktree.json`, which is shared across worktrees, plus session entries for the current branch view. Each link records origin path/branch/head, worktree path/branch/base, whether changes were carried, the owning session id, and a status of `active`, `landed`, or `removed`. Because the store lives in the repo rather than the session, `/land` works after `cd` into the new worktree and a fresh Pi session.
+
+Worktrees are session-exclusive: a link belongs to the session that created it. Landing another session's active link is blocked for tools (the model is told to ask you) and asks for confirmation for `/land` — unless you are standing inside that worktree, which counts as possession. Links created before ownership existed are unowned and landable by anyone.
 
 The TUI shows linkage as a one-line widget and footer status: children show `🌲 <branch> → <origin>`, origins show `🌲 2 worktrees · a · b`. Result cards stay two lines; full output is one expand away.
 

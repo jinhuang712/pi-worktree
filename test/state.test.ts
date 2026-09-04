@@ -8,8 +8,10 @@ import {
   childrenOf,
   emptyStore,
   findByWorktree,
+  foreignOwnerOf,
   loadStore,
   markLanded,
+  ownerLabel,
   saveStore,
   upsertLink,
   type WorktreeLink,
@@ -51,6 +53,27 @@ test("childrenOf only returns active links for the origin", () => {
   assert.equal(childrenOf(landed, "/repo").length, 1);
   assert.equal(activeLinkFor(landed, "/repo.worktrees/pi-x"), undefined);
   assert.equal(findByWorktree(landed, "/repo.worktrees/pi-x")?.status, "landed");
+});
+
+test("session exclusivity: foreign links gate, own/unowned/possession pass", () => {
+  const mine = link({ sessionId: "sess-me", sessionName: "🌲 wt-1" });
+  const others = link({ id: "o", worktreePath: "/repo.worktrees/wt-2", branch: "wt-2", sessionId: "sess-other", sessionName: "🌲 wt-2" });
+  const legacy = link({ id: "l", worktreePath: "/repo.worktrees/wt-3", branch: "wt-3" });
+  // Own and legacy links are free.
+  assert.equal(foreignOwnerOf(mine, "sess-me", "/repo"), undefined);
+  assert.equal(foreignOwnerOf(legacy, "sess-me", "/repo"), undefined);
+  // Another session's link gates…
+  assert.equal(foreignOwnerOf(others, "sess-me", "/repo")?.branch, "wt-2");
+  // …unless standing inside it (fresh session after cd).
+  assert.equal(foreignOwnerOf(others, "sess-me", "/repo.worktrees/wt-2"), undefined);
+  // Landed links never gate.
+  assert.equal(foreignOwnerOf({ ...others, status: "landed" }, "sess-me", "/repo"), undefined);
+  // Labels.
+  assert.equal(ownerLabel(mine, "sess-me"), "(you)");
+  assert.equal(ownerLabel(others, "sess-me"), `("🌲 wt-2")`);
+  assert.equal(ownerLabel(others, "sess-other"), "(you)");
+  assert.equal(ownerLabel({ ...others, sessionName: null }, "sess-me"), "(session sess-oth)");
+  assert.equal(ownerLabel(legacy, "sess-me"), "");
 });
 
 test("disk roundtrip tolerates missing/corrupt files", async () => {

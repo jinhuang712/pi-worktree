@@ -22,6 +22,7 @@ export const WORKTREE_GUIDELINES = [
   "When the workspace is CLEAN and the task is experimental, risky, or explicitly parallel, proactively offer or call worktree_create instead of editing in place.",
   "Never run raw `git worktree add/remove` shell commands; use the worktree_* tools so origin linkage stays consistent.",
   "When work in a linked worktree is finished, ask the user before calling worktree_land — never land or merge silently.",
+  "Treat linked worktrees as session-exclusive: only call worktree_land on links owned by this session (or unowned legacy links); if a link belongs to another session, ask the user before touching it.",
 ];
 
 function plural(n: number, noun: string): string {
@@ -51,5 +52,6 @@ export function buildPolicySection(f: PolicyFacts): string {
     );
   }
   lines.push("- Never run raw `git worktree add/remove`; use the worktree_* tools so linkage stays consistent.");
+  lines.push("- Worktrees are session-exclusive: only land links owned by this session (or unowned legacy links). Never land another session's active worktree without asking the user first.");
   return lines.join("\n");
 }

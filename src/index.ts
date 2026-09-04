@@ -53,9 +53,11 @@ import {
   canonicalPath,
   childrenOf,
   findByWorktree,
+  foreignOwnerOf,
   loadStore,
   makeId,
   markLanded,
+  ownerLabel,
   samePath,
   saveStore,
   upsertLink,
@@ -243,6 +245,7 @@ function formatWorktreeList(
   worktrees: { path: string; branch: string | null; bare?: boolean; detached?: boolean }[],
   originOfCurrent?: WorktreeLink,
   kids: WorktreeLink[] = [],
+  me?: string | null,
 ): string {
   const lines = [
     `Repo: ${topLevel}`,
@@ -260,11 +263,15 @@ function formatWorktreeList(
     lines.push(`  ${label}  ${w.path}`);
   }
   if (originOfCurrent && originOfCurrent.status === "active") {
-    lines.push(`Linked origin: ${originOfCurrent.originBranch ?? "?"} @ ${originOfCurrent.originPath}`);
+    const tag = ownerLabel(originOfCurrent, me);
+    lines.push(`Linked origin: ${originOfCurrent.originBranch ?? "?"} @ ${originOfCurrent.originPath}${tag ? ` ${tag}` : ""}`);
   }
   if (kids.length > 0) {
     lines.push(`Linked children (${kids.length}):`);
-    for (const k of kids) lines.push(`  ${k.branch}  ${k.worktreePath}`);
+    for (const k of kids) {
+      const tag = ownerLabel(k, me);
+      lines.push(`  ${k.branch}  ${k.worktreePath}${tag ? ` ${tag}` : ""}`);
+    }
   }
   return lines.join("\n");
 }
@@ -337,7 +344,7 @@ export default function (pi: ExtensionAPI) {
       const kids = store ? childrenOf(store, canon) : [];
       const text = formatWorktreeList(
         facts.topLevel, facts.branch, facts.clean, facts.porcelain,
-        facts.worktrees, link, kids,
+        facts.worktrees, link, kids, ctx.sessionManager.getSessionId(),
       );
       return {
         content: [{ type: "text", text }],
@@ -452,6 +459,8 @@ export default function (pi: ExtensionAPI) {
         carried,
         createdAt: Date.now(),
         status: "active",
+        sessionId: ctx.sessionManager.getSessionId(),
+        sessionName: pi.getSessionName() ?? null,
       };
       const store = await loadStore(commonDir);
       await saveStore(commonDir, upsertLink(store, link));
@@ -500,6 +509,7 @@ export default function (pi: ExtensionAPI) {
         finish: params.finish ?? false,
         abort: params.abort ?? false,
         interactive: false,
+        sessionId: ctx.sessionManager.getSessionId(),
       });
       return {
         content: [{ type: "text", text: result.text }],
@@ -516,6 +526,10 @@ export default function (pi: ExtensionAPI) {
     finish: boolean;
     abort: boolean;
     interactive: boolean;
+    /** Current pi session id — gates session-exclusive links. */
+    sessionId?: string | null;
+    /** Slash-side override for foreign-owned links (confirm dialog). Tools omit it → hard deny. */
+    confirmForeign?: (links: WorktreeLink[]) => Promise<boolean>;
   }
 
   async function landFlow(
@@ -603,6 +617,32 @@ export default function (pi: ExtensionAPI) {
         text: "Current HEAD is detached — create a branch first (`git switch -c <name>`) so /land knows what to merge.",
         details: { ok: false, reason: "detached-source" },
       };
+    }
+
+    // Session exclusivity: never silently touch another session's live worktree.
+    // Either end (source child or explicit target) can be the owned one.
+    {
+      const candidates = [
+        link,
+        findByWorktree(store, targetPath),
+      ];
+      const foreign = [...new Set(candidates.filter((l): l is WorktreeLink => !!l))]
+        .map((l) => foreignOwnerOf(l, opts.sessionId, canon))
+        .filter((l): l is WorktreeLink => !!l);
+      if (foreign.length > 0) {
+        const who = foreign.map((l) => `\`${l.branch}\` ${ownerLabel(l, opts.sessionId)}`).join(", ");
+        if (opts.confirmForeign) {
+          const go = await opts.confirmForeign(foreign);
+          if (!go) {
+            return { text: "Cancelled — left the other session's worktree alone.", details: { ok: false, reason: "cancelled" } };
+          }
+        } else {
+          return {
+            text: `Blocked: ${who} belongs to another session. Ask the user before landing it — pass an explicit target from the owning session instead.`,
+            details: { ok: false, reason: "owned-by-other", branches: foreign.map((l) => l.branch) },
+          };
+        }
+      }
     }
 
     // Abort / finish operate on whichever side holds MERGE_HEAD (normally
@@ -801,7 +841,7 @@ export default function (pi: ExtensionAPI) {
         const canon = await canonicalPath(facts.topLevel);
         const link = store ? (activeLinkFor(store, canon) ?? findByWorktree(store, canon)) : undefined;
         const kids = store ? childrenOf(store, canon) : [];
-        const text = formatWorktreeList(facts.topLevel, facts.branch, facts.clean, facts.porcelain, facts.worktrees, link, kids);
+        const text = formatWorktreeList(facts.topLevel, facts.branch, facts.clean, facts.porcelain, facts.worktrees, link, kids, ctx.sessionManager.getSessionId());
         emit(ctx, text, "info");
         if (parsed.json) {
           pi.sendMessage(
@@ -919,6 +959,8 @@ export default function (pi: ExtensionAPI) {
         carried,
         createdAt: Date.now(),
         status: "active",
+        sessionId: ctx.sessionManager.getSessionId(),
+        sessionName: pi.getSessionName() ?? null,
       };
       const store = await loadStore(commonDir);
       await saveStore(commonDir, upsertLink(store, link));
@@ -991,7 +1033,7 @@ export default function (pi: ExtensionAPI) {
         const kids = store ? childrenOf(store, canon) : [];
         const merging = await hasMergeHead(exec, cwd);
         emit(ctx, 
-          `${formatWorktreeList(facts.topLevel, facts.branch, facts.clean, facts.porcelain, facts.worktrees, link, kids)}${merging ? "\nMERGE_HEAD present — merge in progress." : ""}`,
+          `${formatWorktreeList(facts.topLevel, facts.branch, facts.clean, facts.porcelain, facts.worktrees, link, kids, ctx.sessionManager.getSessionId())}${merging ? "\nMERGE_HEAD present — merge in progress." : ""}`,
           "info",
         );
         return;
@@ -1034,6 +1076,13 @@ export default function (pi: ExtensionAPI) {
         finish: parsed.cont,
         abort: parsed.abort,
         interactive: true,
+        sessionId: ctx.sessionManager.getSessionId(),
+        confirmForeign: ctx.hasUI && !parsed.yes
+          ? async (foreign) => {
+            const who = foreign.map((l) => `\`${l.branch}\` ${ownerLabel(l, ctx.sessionManager.getSessionId())}`).join(", ");
+            return ctx.ui.confirm("Land another session's worktree?", `${who} is owned by a different session. Land it anyway?`);
+          }
+          : undefined,
       });
 
       // Same one-shot rule as /worktree: the result card hands off to the model
