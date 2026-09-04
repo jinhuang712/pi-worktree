@@ -475,6 +475,10 @@ export default function (pi: ExtensionAPI) {
     const store = await loadStore(commonDir);
 
     // Resolve source (where the feature commits live) and target (origin).
+    // Invoked from the child side (normal): source = here, target = origin.
+    // Invoked from the origin side with a single active child: flip —
+    // source = the child, target = here — so /land does the right thing
+    // instead of erroring about direction.
     let link = activeLinkFor(store, canon) ?? findByWorktree(store, canon);
     let sourcePath = canon;
     let sourceBranch = (await collectFacts(exec, cwd))?.branch ?? link?.branch ?? null;
@@ -484,6 +488,21 @@ export default function (pi: ExtensionAPI) {
     if (link && link.status === "active") {
       targetPath = link.originPath;
       targetBranch = link.originBranch ?? undefined;
+    } else if (!opts.to) {
+      const kids = childrenOf(store, canon);
+      if (kids.length === 1) {
+        link = kids[0];
+        sourcePath = await canonicalPath(link.worktreePath);
+        sourceBranch = link.branch;
+        targetPath = canon;
+        targetBranch = (await collectFacts(exec, cwd))?.branch ?? link.originBranch ?? undefined;
+      } else if (kids.length > 1) {
+        const names = kids.map((k) => `${k.branch} @ ${k.worktreePath}`).join("\n");
+        return {
+          text: `Multiple active worktrees hang off this origin. Land one explicitly:\n${names}\nPass target (path or branch), e.g. /land --to <branch>.`,
+          details: { ok: false, reason: "ambiguous-child", children: kids },
+        };
+      }
     }
     if (opts.to) {
       // Explicit target wins: may be a path or a branch name.
@@ -600,13 +619,20 @@ export default function (pi: ExtensionAPI) {
         };
       }
     }
+    // Target must be committable too — checkpoint it automatically instead of
+    // erroring out, mirroring the source side above.
+    let targetCheckpoint: string | null = null;
     const tgtStatus = await getStatusPorcelain(exec, targetPath);
     if (!tgtStatus.clean) {
-      const files = tgtStatus.porcelain.split("\n").filter(Boolean).slice(0, 10).join("\n");
-      return {
-        text: `Target ${targetPath} has uncommitted changes — commit or stash there first so the merge is safe:\n${files}`,
-        details: { ok: false, reason: "target-dirty", target: targetPath },
-      };
+      const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
+      const c = await ensureCommitted(exec, targetPath, `land(${sourceBranch}): target checkpoint ${ts}`, undefined);
+      if (!c.committed) {
+        return {
+          text: `Could not commit pending changes in target ${targetPath}:\n${c.output}\nConfigure git identity or commit manually, then retry.`,
+          details: { ok: false, reason: "target-commit-failed", output: c.output, target: targetPath },
+        };
+      }
+      targetCheckpoint = c.sha ?? null;
     }
 
     const squashMsg = opts.message?.trim() || `land(${sourceBranch}): squash into ${targetBranch ?? "origin"}`;
@@ -631,8 +657,8 @@ export default function (pi: ExtensionAPI) {
     await recordEvent({ kind: "land", source: sourcePath, target: targetPath, strategy: opts.strategy, sha });
     const cleanup = opts.remove ? await cleanupWorktree(exec, commonDir, store, link, sourcePath, sourceBranch, targetPath) : "";
     return {
-      text: [`Landed \`${sourceBranch}\` into ${targetPath} (${opts.strategy}, ${shortSha(sha)}).`, merged.output, cleanup].filter(Boolean).join("\n"),
-      details: { ok: true, sha, target: targetPath, source: sourcePath, strategy: opts.strategy, cleanup },
+      text: [`Landed \`${sourceBranch}\` into ${targetPath} (${opts.strategy}, ${shortSha(sha)}).`, targetCheckpoint ? `Target had pending changes — checkpointed as ${shortSha(targetCheckpoint)} before merging.` : "", merged.output, cleanup].filter(Boolean).join("\n"),
+      details: { ok: true, sha, target: targetPath, source: sourcePath, strategy: opts.strategy, cleanup, targetCheckpoint },
     };
   }
 
