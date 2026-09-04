@@ -2,6 +2,15 @@
 
 All notable changes to `pi-worktree` are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- `/worktree` is one shot: free text after the command is treated as the task (branch names only match single ASCII tokens), the agent auto-continues inside the new worktree, and asks before landing — no more idle script-like stops. Both commands trigger the next model turn instead of queueing `nextTurn` messages.
+- Auto branches are short flat `wt-*` (`wt-0904-1111`) and bump `-2`/`-3` on collision, so fresh sessions never hit `already exists`; explicit names still error to keep typos visible.
+- `/land` from the origin side auto-flips to the single active child, and dirty targets are checkpoint-committed instead of erroring.
+- Display overhaul: two-line result cards (full output one expand away), short widget/status lines, no absolute-path repetition, session renamed to the worktree branch for session isolation.
+
 ## [0.1.0] - 2026-09-04
 
 ### Added

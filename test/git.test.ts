@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   parseWorktreePorcelain,
+  resolveUniqueBranch,
   sanitizeBranchName,
   suggestBranchName,
+  type ExecFn,
 } from "../src/git.ts";
 
 test("parses git worktree list --porcelain", () => {
@@ -46,9 +48,21 @@ test("sanitizes hostile branch names", () => {
   assert.equal(sanitizeBranchName(""), "");
 });
 
-test("suggests timestamped branches", () => {
+test("suggests short wt- branches", () => {
   const d = new Date(2026, 8, 4, 10, 30);
-  assert.equal(suggestBranchName("main", d), "pi/work-20260904-1030");
-  assert.equal(suggestBranchName("feat-x", d), "pi/feat-x-20260904-1030");
-  assert.match(suggestBranchName(null), /^pi\/work-\d{8}-\d{4}$/);
+  assert.equal(suggestBranchName("main", d), "wt-0904-1030");
+  assert.equal(suggestBranchName("feat-x", d), "wt-feat-x-0904-1030");
+  assert.equal(suggestBranchName("pi/my-feature", d), "wt-pi-my-feature-0904-1030");
+  assert.match(suggestBranchName(null), /^wt-\d{4}-\d{4}$/);
+});
+
+test("resolveUniqueBranch bumps on collision", async () => {
+  const taken = new Set(["wt-0904-1030", "wt-0904-1030-2"]);
+  const exec: ExecFn = async (_cmd, args) => {
+    const ref = args[args.length - 1];
+    const branch = ref.replace(/^refs\/heads\//, "");
+    return { stdout: "", stderr: "", code: taken.has(branch) ? 0 : 1 };
+  };
+  assert.equal(await resolveUniqueBranch(exec, "/repo", "wt-0904-1030"), "wt-0904-1030-3");
+  assert.equal(await resolveUniqueBranch(exec, "/repo", "wt-fresh-0000"), "wt-fresh-0000");
 });

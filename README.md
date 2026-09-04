@@ -31,20 +31,20 @@ From the current branch, create a new linked worktree carrying the associated ch
 - New worktrees default to `<repo>.worktrees/<branch>` (slashes become dashes), deduplicated with `-2`, `-3`, and so on.
 
 ```text
-/worktree pi/my-feature
-/worktree pi/hotfix --base origin/main
+/worktree              # one shot: auto wt-* branch, agent continues the task there
+/worktree my-feature   # explicit branch, still one shot
+/worktree my-feature "fix the login bug"  # branch + task
 /worktree list
 /worktree prune
 ```
 
-After creation, `cd` into the new worktree and continue there; finish with `/land`.
+After creation the agent keeps working inside the new worktree on its own; when done it asks whether to land. Finish with `/land`.
 
 ### `/land [--to <path|branch>] [--strategy merge|squash] [-m <msg>] [--no-remove] [--yes]`
 
 Land the current linked worktree back into its origin.
 
-1. Commits pending changes in the source worktree (prompts for a message, auto-generates one with `--yes`).
-2. Refuses when the target worktree is dirty — commit or stash there first so the merge is safe.
+1. Commits pending changes on both sides automatically (timestamped checkpoints, no prompts).
 3. Merges with `merge --no-edit` by default, or `--strategy squash`.
 4. On conflict, lists the conflicted files and leaves `MERGE_HEAD` in place. Resolve the files, `git add` them, then `/land --continue`. Abort with `/land --abort`. Both work no matter which side you invoke them from.
 5. On success, marks the linkage landed and cleans up (`worktree remove` plus `branch -d`) unless `--no-remove`.
@@ -78,15 +78,14 @@ Every turn, a short policy section is appended to the system prompt:
 
 Stored in `<git-common-dir>/pi-worktree.json`, which is shared across worktrees, plus session entries for the current branch view. Each link records origin path/branch/head, worktree path/branch/base, whether changes were carried, and a status of `active`, `landed`, or `removed`. Because the store lives in the repo rather than the session, `/land` works after `cd` into the new worktree and a fresh Pi session.
 
-The TUI shows linkage as a widget and footer status: linked children show `🌲 <branch> → origin <branch>`, origins show their active child count.
+The TUI shows linkage as a one-line widget and footer status: children show `🌲 <branch> → <origin>`, origins show `🌲 2 worktrees · a · b`. Result cards stay two lines; full output is one expand away.
 
 ## Safety
 
 - Never force-pushes; never pushes at all.
 - Never auto-deletes branches with `-D` (uses `-d`, and keeps the branch when worktree removal fails).
 - Stash apply tries `--index` first, falls back to plain apply, and drops the stash only on success.
-- Target-dirty and same-path lands are blocked with explicit file lists.
-- Detached-`HEAD` sources are blocked with a `git switch -c` hint.
+- Both sides auto-commit before merging (checkpoint messages); same-path and detached-`HEAD` lands are blocked with hints.
 
 ## Development
 
