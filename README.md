@@ -38,7 +38,7 @@ From the current branch, create a new linked worktree carrying the associated ch
 /worktree prune
 ```
 
-After creation the agent keeps working inside the new worktree on its own; when done it asks whether to land. Finish with `/land`.
+After creation the agent keeps working inside the new worktree on its own; when done it asks whether to land. Finish with `/land`. One session owns at most one active worktree per repo — creating again points back at the owned link until it is landed.
 
 ### `/land [--to <path|branch>] [--strategy merge|squash] [-m <msg>] [--no-remove] [--yes]`
 
