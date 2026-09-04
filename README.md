@@ -81,7 +81,7 @@ Stored in `<git-common-dir>/pi-worktree.json`, which is shared across worktrees,
 
 Worktrees are session-exclusive: a link belongs to the session that created it. Landing another session's active link is blocked for tools (the model is told to ask you) and asks for confirmation for `/land` — unless you are standing inside that worktree, which counts as possession. Links created before ownership existed are unowned and landable by anyone.
 
-The TUI shows linkage as a one-line widget and footer status: children show `🌲 <branch> → <origin>`, origins show `🌲 2 worktrees · a · b`. Result cards stay two lines; full output is one expand away.
+The TUI shows linkage as a one-line widget and footer status: children show `🌲 <branch> → <origin>`, origins show `🌲 2 worktrees · wt-mine · wt-theirs (other)` — own links first, other sessions' links tagged. Result cards stay two lines; full output is one expand away.
 
 ## Safety
 

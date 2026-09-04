@@ -57,6 +57,7 @@ import {
   loadStore,
   makeId,
   markLanded,
+  orderKidsForDisplay,
   ownerLabel,
   samePath,
   saveStore,
@@ -224,7 +225,14 @@ async function refreshChrome(
       ctx.ui.setWidget(WIDGET_KEY, [`🌲 ${link.branch} → ${dest}`]);
       ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `wt: ${link.branch}`));
     } else if (kids.length > 0) {
-      const shown = kids.map((k) => k.branch).slice(0, 3).join(" · ");
+      // Visibility is intentional (git state is repo-global); exclusivity is
+      // enforced on land, and marked here: own links first and plain,
+      // other sessions' links tagged so "why do I see theirs" is self-evident.
+      const me = ctx.sessionManager.getSessionId();
+      const ordered = orderKidsForDisplay(kids, me);
+      const shown = ordered.slice(0, 3)
+        .map((k) => (foreignOwnerOf(k, me, canon) ? `${k.branch} (other)` : k.branch))
+        .join(" · ");
       const more = kids.length > 3 ? ` +${kids.length - 3}` : "";
       ctx.ui.setWidget(WIDGET_KEY, [`🌲 ${pluralWorktree(kids.length)} · ${shown}${more}`]);
       ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `wt: ${pluralWorktree(kids.length)}`));

@@ -11,6 +11,7 @@ import {
   foreignOwnerOf,
   loadStore,
   markLanded,
+  orderKidsForDisplay,
   ownerLabel,
   saveStore,
   upsertLink,
@@ -74,6 +75,14 @@ test("session exclusivity: foreign links gate, own/unowned/possession pass", () 
   assert.equal(ownerLabel(others, "sess-other"), "(you)");
   assert.equal(ownerLabel({ ...others, sessionName: null }, "sess-me"), "(session sess-oth)");
   assert.equal(ownerLabel(legacy, "sess-me"), "");
+});
+
+test("origin widget orders own links first", () => {
+  const mine = link({ id: "m", worktreePath: "/repo.worktrees/wt-m", branch: "wt-m", sessionId: "me" });
+  const theirs = link({ id: "t", worktreePath: "/repo.worktrees/wt-t", branch: "wt-t", sessionId: "other" });
+  const legacy = link({ id: "l", worktreePath: "/repo.worktrees/wt-l", branch: "wt-l" });
+  assert.deepEqual(orderKidsForDisplay([theirs, legacy, mine], "me").map((k) => k.branch), ["wt-m", "wt-t", "wt-l"]);
+  assert.deepEqual(orderKidsForDisplay([theirs, legacy], "me").map((k) => k.branch), ["wt-t", "wt-l"]);
 });
 
 test("disk roundtrip tolerates missing/corrupt files", async () => {
