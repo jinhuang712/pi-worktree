@@ -23,6 +23,7 @@ export const WORKTREE_GUIDELINES = [
   "Never run raw `git worktree add/remove` shell commands; use the worktree_* tools so origin linkage stays consistent.",
   "When work in a linked worktree is finished, ask the user before calling worktree_land — never land or merge silently.",
   "Treat linked worktrees as session-exclusive: only call worktree_land on links owned by this session (or unowned legacy links); if a link belongs to another session, ask the user before touching it.",
+  "One active worktree per session per repo: reuse the owned link instead of calling worktree_create again; call worktree_land first when its work is done.",
 ];
 
 function plural(n: number, noun: string): string {

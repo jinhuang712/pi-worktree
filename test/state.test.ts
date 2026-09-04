@@ -15,6 +15,7 @@ import {
   ownerLabel,
   saveStore,
   upsertLink,
+  ownActiveLink,
   visibleKidsFor,
   type WorktreeLink,
 } from "../src/state.ts";
@@ -76,6 +77,17 @@ test("session exclusivity: foreign links gate, own/unowned/possession pass", () 
   assert.equal(ownerLabel(others, "sess-other"), "(you)");
   assert.equal(ownerLabel({ ...others, sessionName: null }, "sess-me"), "(session sess-oth)");
   assert.equal(ownerLabel(legacy, "sess-me"), "");
+});
+
+test("ownActiveLink enforces one worktree per session", () => {
+  const mine = link({ id: "m", worktreePath: "/repo.worktrees/wt-m", branch: "wt-m", sessionId: "me" });
+  const mineOtherRepo = link({ id: "o", originPath: "/other", worktreePath: "/other.worktrees/wt-o", branch: "wt-o", sessionId: "me" });
+  const theirs = link({ id: "t", worktreePath: "/repo.worktrees/wt-t", branch: "wt-t", sessionId: "other" });
+  const store = upsertLink(upsertLink(upsertLink(emptyStore(), mine), mineOtherRepo), theirs);
+  assert.equal(ownActiveLink(store, "/repo", "me")?.branch, "wt-m");
+  assert.equal(ownActiveLink(store, "/other", "me")?.branch, "wt-o");
+  assert.equal(ownActiveLink(store, "/repo", "nobody"), undefined);
+  assert.equal(ownActiveLink(store, "/repo", null), undefined);
 });
 
 test("visibleKidsFor hides foreign-owned links", () => {

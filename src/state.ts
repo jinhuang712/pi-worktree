@@ -162,6 +162,18 @@ export function visibleKidsFor(
   return kids.filter((k) => !foreignOwnerOf(k, me, herePath));
 }
 
+/** The session's single active worktree for an origin, if any.
+ *  One session owns at most one worktree per repo — creation is blocked
+ *  while this returns a link (land it first). */
+export function ownActiveLink(
+  store: WorktreeStore,
+  originPath: string,
+  me: string | null | undefined,
+): WorktreeLink | undefined {
+  if (!me) return undefined;
+  return childrenOf(store, originPath).find((l) => l.sessionId === me);
+}
+
 /** Display order for the origin widget: own links first, then the rest. */
 export function orderKidsForDisplay(
   kids: WorktreeLink[],

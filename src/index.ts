@@ -60,6 +60,7 @@ import {
   markLanded,
   orderKidsForDisplay,
   ownerLabel,
+  ownActiveLink,
   samePath,
   saveStore,
   upsertLink,
@@ -410,6 +411,19 @@ export default function (pi: ExtensionAPI) {
       const facts = await collectFacts(exec, cwd);
       const originBranch = facts?.branch ?? null;
       const originHead = facts?.head ?? null;
+
+      // One session, one worktree per repo: reuse the owned link instead of
+      // piling up auto-bumped siblings.
+      {
+        const me = ctx.sessionManager.getSessionId();
+        const owned = ownActiveLink(await loadSyncedStore(exec, cwd, commonDir), await canonicalPath(topLevel), me);
+        if (owned) {
+          return {
+            content: [{ type: "text", text: `Session already owns active worktree \`${owned.branch}\` at ${owned.worktreePath} for this repo — continue there instead of creating another. Land it first (worktree_land) if the work is done.` }],
+            details: { ok: false, reason: "already-own-active", branch: owned.branch, path: owned.worktreePath },
+          };
+        }
+      }
 
       const rawBranch = (params.branch ?? "").trim();
       const explicitBranch = sanitizeBranchName(rawBranch);
@@ -878,8 +892,21 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (parsed.sub === "prune") {
+        // Heal the linkage store too: externally removed worktrees stop haunting it.
+        let healed = 0;
+        try {
+          const cdir = await getCommonDir(exec, cwd);
+          if (cdir) {
+            const before = await loadStore(cdir);
+            const after = await loadSyncedStore(exec, cwd, cdir);
+            healed = after.links.filter((l) => l.status !== "active" && before.links.find((b) => b.id === l.id)?.status === "active").length;
+          }
+        } catch {
+          // Non-fatal; git prune below still runs.
+        }
         const r = await pruneWorktrees(exec, cwd);
-        emit(ctx, r.code === 0 ? "Pruned stale worktree metadata." : `Prune failed:\n${r.stderr.trim()}`, r.code === 0 ? "info" : "error");
+        const extra = healed > 0 ? ` Healed ${healed} stale link(s).` : "";
+        emit(ctx, r.code === 0 ? `Pruned stale worktree metadata.${extra}` : `Prune failed:\n${r.stderr.trim()}`, r.code === 0 ? "info" : "error");
         return;
       }
 
@@ -916,6 +943,16 @@ export default function (pi: ExtensionAPI) {
       if (!commonDir) {
         emit(ctx, "Cannot resolve git dir.", "error");
         return;
+      }
+
+      // One session, one worktree per repo — point back at the owned link.
+      {
+        const me = ctx.sessionManager.getSessionId();
+        const owned = ownActiveLink(await loadSyncedStore(exec, cwd, commonDir), await canonicalPath(facts.topLevel), me);
+        if (owned) {
+          emit(ctx, `Session already owns active worktree \`${owned.branch}\` at ${owned.worktreePath} — continue there instead of creating another. /land it first if the work is done.`, "error");
+          return;
+        }
       }
 
       // Resolve branch vs task from positionals:
