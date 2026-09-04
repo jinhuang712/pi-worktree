@@ -1,0 +1,126 @@
+/**
+ * pi-worktree linkage store.
+ *
+ * Session entries alone are not enough: after `/worktree` the user typically
+ * `cd`s into the new worktree and starts a fresh pi session with a different
+ * cwd/session file. A small JSON file in the shared git dir keeps the
+ * origin <-> worktree mapping discoverable from either side.
+ */
+
+export interface WorktreeLink {
+  id: string;
+  originPath: string;
+  originBranch: string | null;
+  originHead: string | null;
+  worktreePath: string;
+  branch: string;
+  base: string | null;
+  carried: boolean;
+  createdAt: number;
+  status: "active" | "landed" | "removed";
+  landedAt?: number;
+  landStrategy?: string;
+  landSha?: string | null;
+}
+
+export interface WorktreeStore {
+  version: 1;
+  links: WorktreeLink[];
+}
+
+export const STORE_FILE = "pi-worktree.json";
+
+export function storePath(commonDir: string): string {
+  return `${commonDir.replace(/\/+$/, "")}/${STORE_FILE}`;
+}
+
+export function emptyStore(): WorktreeStore {
+  return { version: 1, links: [] };
+}
+
+export function normalizePath(p: string): string {
+  return p.replace(/\/+$/, "") || "/";
+}
+
+/** Best-effort realpath; falls back to normalized input when missing. */
+export async function canonicalPath(p: string): Promise<string> {
+  try {
+    const { realpath } = await import("node:fs/promises");
+    return normalizePath(await realpath(p));
+  } catch {
+    const { resolve } = await import("node:path");
+    return normalizePath(resolve(p));
+  }
+}
+
+export function samePath(a: string, b: string): boolean {
+  return normalizePath(a) === normalizePath(b);
+}
+
+export async function loadStore(commonDir: string): Promise<WorktreeStore> {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const raw = await readFile(storePath(commonDir), "utf8");
+    const parsed = JSON.parse(raw) as Partial<WorktreeStore>;
+    if (!parsed || !Array.isArray(parsed.links)) return emptyStore();
+    return {
+      version: 1,
+      links: parsed.links.filter(
+        (l): l is WorktreeLink =>
+          !!l && typeof (l as WorktreeLink).worktreePath === "string" && typeof (l as WorktreeLink).id === "string",
+      ),
+    };
+  } catch {
+    return emptyStore();
+  }
+}
+
+/** Atomic write (tmp + rename) so concurrent pi sessions do not tear the file. */
+export async function saveStore(commonDir: string, store: WorktreeStore): Promise<void> {
+  const { mkdir, writeFile, rename } = await import("node:fs/promises");
+  const { dirname } = await import("node:path");
+  const dest = storePath(commonDir);
+  await mkdir(dirname(dest), { recursive: true });
+  const tmp = `${dest}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+  await rename(tmp, dest);
+}
+
+export function upsertLink(store: WorktreeStore, link: WorktreeLink): WorktreeStore {
+  const idx = store.links.findIndex((l) => l.id === link.id);
+  const links = [...store.links];
+  if (idx >= 0) links[idx] = link;
+  else links.push(link);
+  return { version: 1, links };
+}
+
+export function findByWorktree(store: WorktreeStore, worktreePath: string): WorktreeLink | undefined {
+  const want = normalizePath(worktreePath);
+  return store.links.find((l) => normalizePath(l.worktreePath) === want);
+}
+
+export function activeLinkFor(store: WorktreeStore, worktreePath: string): WorktreeLink | undefined {
+  const link = findByWorktree(store, worktreePath);
+  return link && link.status === "active" ? link : undefined;
+}
+
+export function childrenOf(store: WorktreeStore, originPath: string): WorktreeLink[] {
+  const want = normalizePath(originPath);
+  return store.links.filter((l) => normalizePath(l.originPath) === want && l.status === "active");
+}
+
+export function markLanded(
+  store: WorktreeStore,
+  id: string,
+  patch: Partial<Pick<WorktreeLink, "status" | "landedAt" | "landStrategy" | "landSha">>,
+): WorktreeStore {
+  return {
+    version: 1,
+    links: store.links.map((l) => (l.id === id ? { ...l, ...patch } : l)),
+  };
+}
+
+export function makeId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  return `wt-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+}
