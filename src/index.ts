@@ -867,8 +867,8 @@ export default function (pi: ExtensionAPI) {
       await refreshChrome(pi, ctx, cwd);
 
       const agentHandoff = task
-        ? `Task: ${task}. Continue it inside ${targetPath}; when done, ask the user "可以 land 了吗？" — do NOT land without confirmation.`
-        : `Continue the pending work inside ${targetPath}; when done, ask the user "可以 land 了吗？" — do NOT land without confirmation.`;
+        ? `User ran /worktree with extra text: "${task}". Work inside ${targetPath} — if the text is a real task, do it there; if it is vague chatter, infer the actual task from conversation history instead. When done, ask the user before landing — do NOT land without confirmation.`
+        : `User ran /worktree with no extra text. Infer the pending task from conversation history and do it inside ${targetPath}; when done, ask the user before landing — do NOT land without confirmation.`;
       const summary = [
         `Worktree ready: \`${branch}\` at ${targetPath}`,
         carryNote,
@@ -876,10 +876,14 @@ export default function (pi: ExtensionAPI) {
         `(Session cwd stays at the origin — work with \`cd ${targetPath} && ...\` / absolute paths, keep all edits in the new worktree.)`,
       ].join("\n");
       // The card below is the visible confirmation; skip emit with UI to avoid duplicates.
+      // triggerTurn:true hands off to the model so /worktree is one shot:
+      // create → agent continues the task in the new worktree (no manual follow-up).
+      // NOTE: deliverAs:"nextTurn" only queues for the next user prompt and leaves
+      // the session idle looking script-like — do NOT use it here.
       if (!ctx.hasUI) emit(ctx, summary, "info");
       pi.sendMessage(
         { customType: "pi-worktree", content: summary, display: true },
-        { deliverAs: "nextTurn" },
+        { triggerTurn: true },
       );
     },
   });
@@ -940,21 +944,8 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // Confirm destructive-looking lands interactively.
-      if (ctx.hasUI && !parsed.yes && !parsed.cont && !parsed.abort) {
-        const facts = await collectFacts(exec, cwd);
-        if (facts && !facts.clean && !parsed.message) {
-          const msg = await ctx.ui.input(
-            "Pending changes will be committed first — message (empty = auto)",
-            `land(${facts.branch ?? "work"}): ${new Date().toISOString().slice(0, 16).replace("T", " ")}`,
-          );
-          if (msg === undefined) {
-            emit(ctx, "Cancelled.", "info");
-            return;
-          }
-          if (msg.trim()) parsed.message = msg.trim();
-        }
-      }
+      // No commit-message prompt: checkpoint messages auto-generate inside landFlow.
+      // Prompting here stalls the one-shot flow (and ui.input ignores placeholders).
 
       const result = await landFlow(exec, cwd, {
         to,
@@ -966,10 +957,12 @@ export default function (pi: ExtensionAPI) {
         interactive: true,
       });
 
-      emit(ctx, result.text, result.details.ok ? "info" : "error");
+      // Same one-shot rule as /worktree: the result card hands off to the model
+      // (summarize / continue) instead of leaving the session idle script-like.
+      if (!ctx.hasUI) emit(ctx, result.text, result.details.ok ? "info" : "error");
       pi.sendMessage(
         { customType: "pi-worktree", content: result.text, display: true },
-        { deliverAs: "nextTurn" },
+        { triggerTurn: true },
       );
       const topAfter = await getTopLevel(exec, cwd);
       if (topAfter) await refreshChrome(pi, ctx, topAfter);
