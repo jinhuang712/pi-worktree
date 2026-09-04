@@ -150,6 +150,18 @@ export function ownerLabel(link: WorktreeLink, me: string | null | undefined): s
   return `(session ${link.sessionId.slice(0, 8)})`;
 }
 
+/** Display order for the origin widget: own links first, then the rest. */
+export function orderKidsForDisplay(
+  kids: WorktreeLink[],
+  me: string | null | undefined,
+): WorktreeLink[] {
+  return [...kids].sort((a, b) => {
+    const am = me && a.sessionId === me ? 0 : 1;
+    const bm = me && b.sessionId === me ? 0 : 1;
+    return am - bm;
+  });
+}
+
 export function makeId(): string {  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
   return `wt-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 }
