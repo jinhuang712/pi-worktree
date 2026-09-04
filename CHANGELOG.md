@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `pi-worktree-land` are documented here.
+All notable changes to `pi-worktree` are documented here.
 
 ## [0.1.0] - 2026-09-04
 
@@ -19,4 +19,4 @@ All notable changes to `pi-worktree-land` are documented here.
 - Unit plus real-git end-to-end suite: 14 tests passing (`npm test`).
 - `tsc --noEmit` clean.
 - Print-mode round trip verified against real Pi: dirty carry, `--yes` land with auto-cleanup, and abort/continue through a forced conflict.
-- Public GitHub distribution as a Pi package, published to npm as `pi-worktree-land`.
+- Public GitHub distribution as a Pi package (`jinhuang712/pi-worktree`).
