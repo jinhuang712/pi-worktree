@@ -9,7 +9,7 @@
 import {
   loadStore,
   normalizePath,
-  saveStore,
+  saveLink,
   type WorktreeStore,
 } from "./state.ts";
 
@@ -203,19 +203,50 @@ export function sanitizeBranchName(input: string): string {
   return s.slice(0, 200);
 }
 
+const SLUG_STOPWORDS = new Set([
+  "a", "an", "the", "to", "for", "of", "in", "on", "and", "or", "with", "into",
+  "please", "pls", "let", "lets", "let's", "me", "my", "we", "our", "this", "that",
+  "it", "is", "be", "do", "go", "now", "then", "some", "all", "up",
+]);
+
 /**
- * Suggest a short, flat auto branch name: `wt-<base>-<MMDD-HHMM>`
- * (`wt-0904-1111` on main/master). Flat `wt-*` keeps the widget, the
- * sibling `.worktrees` dir, and `git branch` output short. Pair with
- * resolveUniqueBranch so minute-resolution stamps never hard-fail.
+ * Turn free task text into a short ASCII slug for branch names:
+ * `"Fix the login retry bug"` → `fix-login-retry`. Up to three meaningful
+ * words, 24 chars max. Returns "" when the text has no ASCII words (CJK
+ * tasks fall back to the timestamp form).
  */
-export function suggestBranchName(originBranch: string | null, now = new Date()): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const stamp = `${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
+export function slugFromTask(task: string | null | undefined): string {
+  if (!task) return "";
+  const words = task
+    .toLowerCase()
+    .replace(/[^a-z0-9\s_-]/g, " ")
+    .split(/[\s_-]+/)
+    .filter((w) => w.length > 1 && !SLUG_STOPWORDS.has(w));
+  const picked: string[] = [];
+  let len = 0;
+  for (const w of words) {
+    if (picked.length === 3 || len + w.length + (picked.length ? 1 : 0) > 24) break;
+    picked.push(w);
+    len += w.length + (picked.length > 1 ? 1 : 0);
+  }
+  return picked.join("-");
+}
+
+/**
+ * Suggest a short, flat auto branch name. With task text that has ASCII
+ * words: `wt-<slug>` (`wt-fix-login-retry`) so `git branch` reads like a
+ * todo list. Otherwise `wt-<base>-<MMDD-HHMM>` (`wt-0904-1111` on
+ * main/master). Pair with resolveUniqueBranch so collisions never hard-fail.
+ */
+export function suggestBranchName(originBranch: string | null, task?: string | null, now = new Date()): string {
   const rawBase = originBranch && originBranch !== "main" && originBranch !== "master"
     ? sanitizeBranchName(originBranch).replace(/\//g, "-")
     : "";
   const base = rawBase.slice(0, 24).replace(/-+$/, "");
+  const slug = slugFromTask(task);
+  if (slug) return base ? `wt-${base}-${slug}` : `wt-${slug}`;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const stamp = `${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
   return base ? `wt-${base}-${stamp}` : `wt-${stamp}`;
 }
 
@@ -281,7 +312,11 @@ export async function syncStoreWithGit(
   });
   if (changed) {
     const next: WorktreeStore = { ...store, links };
-    await saveStore(commonDir, next);
+    for (const l of links) {
+      if (l.status === "removed" && store.links.some((o) => o.id === l.id && o.status === "active")) {
+        await saveLink(commonDir, l);
+      }
+    }
     // Quiet git-side maintenance so no manual `prune` entry point is needed.
     try {
       await pruneWorktrees(exec, cwd);
@@ -403,15 +438,92 @@ export async function ensureCommitted(
   return { committed: true, sha: sha ?? undefined, output: out };
 }
 
-export type LandStrategy = "merge" | "squash";
+/**
+ * - `rebase`: rebase the source branch onto the target, then fast-forward
+ *   the target — linear history, no merge commit. Falls back to `merge`
+ *   when the rebase hits conflicts (so the normal MERGE_HEAD conflict flow
+ *   applies instead of a half-done rebase).
+ * - `merge`: plain `git merge --no-edit`.
+ * - `squash`: one commit on the target carrying the whole worktree.
+ */
+export type LandStrategy = "rebase" | "merge" | "squash";
 
 export interface LandMergeResult {
   ok: boolean;
   output: string;
   conflicted: string[];
+  /** Distinguishes "conflict, MERGE_HEAD left in place" from plain failures
+   *  (e.g. squash produced nothing to commit). */
+  reason?: "conflict" | "nothing-to-land" | "failed";
+  /** Strategy actually applied (rebase may fall back to merge). */
+  applied: LandStrategy;
+  note?: string;
 }
 
-/** Merge sourceBranch into the repo at targetCwd. Caller must pre-check target cleanliness. */
+export async function isDetached(exec: ExecFn, cwd: string): Promise<boolean> {
+  const r = await run(exec, ["symbolic-ref", "-q", "HEAD"], cwd);
+  return r.code !== 0;
+}
+
+/** Commits in `head` not in `base` (ahead) and vice versa (behind). */
+export async function aheadBehind(
+  exec: ExecFn,
+  cwd: string,
+  base: string,
+  head: string,
+): Promise<{ ahead: number; behind: number }> {
+  const r = await run(exec, ["rev-list", "--left-right", "--count", `${base}...${head}`], cwd);
+  if (r.code !== 0) return { ahead: 0, behind: 0 };
+  const [behind, ahead] = r.stdout.trim().split(/\s+/).map((n) => Number.parseInt(n, 10) || 0);
+  return { ahead: ahead ?? 0, behind: behind ?? 0 };
+}
+
+export interface DiffStat {
+  files: number;
+  insertions: number;
+  deletions: number;
+}
+
+export function parseShortstat(text: string): DiffStat {
+  const files = /(\d+) files? changed/.exec(text);
+  const ins = /(\d+) insertions?/.exec(text);
+  const del = /(\d+) deletions?/.exec(text);
+  return {
+    files: files ? Number(files[1]) : 0,
+    insertions: ins ? Number(ins[1]) : 0,
+    deletions: del ? Number(del[1]) : 0,
+  };
+}
+
+/** What landing `head` onto `base` would change (three-dot: since merge base). */
+export async function diffStat(exec: ExecFn, cwd: string, base: string, head: string): Promise<DiffStat> {
+  const r = await run(exec, ["diff", "--shortstat", `${base}...${head}`], cwd);
+  return parseShortstat(r.code === 0 ? r.stdout : "");
+}
+
+/** Subject lines of commits in `head` not in `base`, newest first. */
+export async function commitSubjects(exec: ExecFn, cwd: string, base: string, head: string, max = 20): Promise<string[]> {
+  const r = await run(exec, ["log", "--format=%s", `-n${max}`, `${base}..${head}`], cwd);
+  if (r.code !== 0) return [];
+  return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+}
+
+/** Rebase the branch checked out at `cwd` onto `onto`. Aborts itself on
+ *  conflict so the worktree is never left mid-rebase. */
+export async function rebaseOnto(
+  exec: ExecFn,
+  cwd: string,
+  onto: string,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; output: string }> {
+  const r = await run(exec, ["rebase", onto], cwd, signal, 120_000);
+  const out = `${r.stdout}\n${r.stderr}`.trim().slice(0, 3000);
+  if (r.code === 0) return { ok: true, output: out };
+  await run(exec, ["rebase", "--abort"], cwd, signal);
+  return { ok: false, output: out };
+}
+
+/** Land sourceBranch into the repo at targetCwd. Caller must pre-commit both sides. */
 export async function mergeInto(
   exec: ExecFn,
   targetCwd: string,
@@ -419,26 +531,50 @@ export async function mergeInto(
   strategy: LandStrategy,
   squashMessage: string,
   signal?: AbortSignal,
+  sourceCwd?: string,
+  targetBranch?: string | null,
 ): Promise<LandMergeResult> {
   if (strategy === "squash") {
     const m = await run(exec, ["merge", "--squash", sourceBranch], targetCwd, signal, 120_000);
     const out = `${m.stdout}\n${m.stderr}`.trim().slice(0, 3000);
     if (m.code !== 0) {
-      return { ok: false, output: out, conflicted: await unmergedFiles(exec, targetCwd) };
+      const conflicted = await unmergedFiles(exec, targetCwd);
+      return { ok: false, output: out, conflicted, reason: conflicted.length ? "conflict" : "failed", applied: "squash" };
+    }
+    const staged = await run(exec, ["diff", "--cached", "--quiet"], targetCwd, signal);
+    if (staged.code === 0) {
+      return { ok: false, output: out, conflicted: [], reason: "nothing-to-land", applied: "squash" };
     }
     const c = await run(exec, ["commit", "-m", squashMessage], targetCwd, signal);
     const cout = `${c.stdout}\n${c.stderr}`.trim().slice(0, 3000);
     if (c.code !== 0) {
-      return { ok: false, output: `${out}\n${cout}`.slice(0, 3000), conflicted: await unmergedFiles(exec, targetCwd) };
+      return { ok: false, output: `${out}\n${cout}`.slice(0, 3000), conflicted: [], reason: "failed", applied: "squash" };
     }
-    return { ok: true, output: `${out}\n${cout}`.slice(0, 3000), conflicted: [] };
+    return { ok: true, output: `${out}\n${cout}`.slice(0, 3000), conflicted: [], applied: "squash" };
   }
+
+  let note: string | undefined;
+  if (strategy === "rebase" && sourceCwd && targetBranch) {
+    const rb = await rebaseOnto(exec, sourceCwd, targetBranch, signal);
+    if (rb.ok) {
+      const ff = await run(exec, ["merge", "--ff-only", sourceBranch], targetCwd, signal, 120_000);
+      const out = `${rb.output}\n${ff.stdout}\n${ff.stderr}`.trim().slice(0, 3000);
+      if (ff.code === 0) return { ok: true, output: out, conflicted: [], applied: "rebase" };
+      note = "fast-forward failed after rebase; merged instead";
+    } else {
+      note = "rebase hit conflicts; merged instead so they can be resolved in place";
+    }
+  } else if (strategy === "rebase") {
+    note = "rebase needs source path + target branch; merged instead";
+  }
+
   const m = await run(exec, ["merge", "--no-edit", sourceBranch], targetCwd, signal, 120_000);
   const out = `${m.stdout}\n${m.stderr}`.trim().slice(0, 3000);
   if (m.code !== 0) {
-    return { ok: false, output: out, conflicted: await unmergedFiles(exec, targetCwd) };
+    const conflicted = await unmergedFiles(exec, targetCwd);
+    return { ok: false, output: out, conflicted, reason: conflicted.length ? "conflict" : "failed", applied: "merge", note };
   }
-  return { ok: true, output: out, conflicted: [] };
+  return { ok: true, output: out, conflicted: [], applied: "merge", note };
 }
 
 export async function removeWorktree(

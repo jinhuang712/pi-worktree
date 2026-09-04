@@ -1,6 +1,6 @@
 {
   "name": "pi-worktree",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Native Pi worktree flow: /worktree isolates changes into a new git worktree, /land merges back with conflict handling. Clean workspaces are encouraged to isolate proactively.",
   "private": false,
   "type": "module",

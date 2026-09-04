@@ -69,6 +69,58 @@ test("create + stash-carry + land clean merge", async () => {
   assert.ok(wts.some((w) => w.branch === "pi/e2e"));
 });
 
+test("rebase strategy lands linear and fast-forwards the origin", async () => {
+  const origin = await initRepo();
+  const wtPath = `${origin}-wt-rb`;
+  assert.equal((await createWorktree(exec, origin, { branch: "wt-rb", path: wtPath })).ok, true);
+
+  // Origin moves on in a different file; worktree commits its own change.
+  writeFileSync(join(origin, "c.txt"), "origin progress\n");
+  await sh(origin, ["add", "-A"]);
+  await sh(origin, ["commit", "-m", "origin progress"]);
+  writeFileSync(join(wtPath, "b.txt"), "feature\n");
+  assert.equal((await ensureCommitted(exec, wtPath, "add feature")).committed, true);
+
+  const r = await mergeInto(exec, origin, "wt-rb", "rebase", "unused", undefined, wtPath, "main");
+  assert.equal(r.ok, true, r.output);
+  assert.equal(r.applied, "rebase");
+  const log = await sh(origin, ["log", "--format=%s %p", "-n3"]);
+  // Top commit is the feature with a single parent: no merge commit.
+  assert.match(log.out.split("\n")[0], /^add feature [0-9a-f]+$/);
+  assert.equal(readFileSync(join(origin, "b.txt"), "utf8"), "feature\n");
+  assert.equal(readFileSync(join(origin, "c.txt"), "utf8"), "origin progress\n");
+});
+
+test("rebase conflict falls back to merge and leaves MERGE_HEAD for the normal flow", async () => {
+  const origin = await initRepo();
+  const wtPath = `${origin}-wt-rbc`;
+  assert.equal((await createWorktree(exec, origin, { branch: "wt-rbc", path: wtPath })).ok, true);
+  writeFileSync(join(origin, "a.txt"), "origin-side\n");
+  await sh(origin, ["add", "-A"]);
+  await sh(origin, ["commit", "-m", "origin side"]);
+  writeFileSync(join(wtPath, "a.txt"), "worktree-side\n");
+  assert.equal((await ensureCommitted(exec, wtPath, "wt side")).committed, true);
+
+  const r = await mergeInto(exec, origin, "wt-rbc", "rebase", "unused", undefined, wtPath, "main");
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "conflict");
+  assert.equal(r.applied, "merge");
+  assert.ok(r.conflicted.includes("a.txt"));
+  // The worktree is not left mid-rebase.
+  assert.equal((await sh(wtPath, ["rev-parse", "-q", "--verify", "REBASE_HEAD"])).code === 0, false);
+  await sh(origin, ["merge", "--abort"]);
+});
+
+test("squash with nothing new reports nothing-to-land, not a conflict", async () => {
+  const origin = await initRepo();
+  const wtPath = `${origin}-wt-empty`;
+  assert.equal((await createWorktree(exec, origin, { branch: "wt-empty", path: wtPath })).ok, true);
+  const r = await mergeInto(exec, origin, "wt-empty", "squash", "msg");
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "nothing-to-land");
+  assert.deepEqual(r.conflicted, []);
+});
+
 test("merge conflict surfaces conflicted files", async () => {
   const origin = await initRepo();
   const wtPath = `${origin}-wt2`;

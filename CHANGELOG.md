@@ -2,7 +2,33 @@
 
 All notable changes to `pi-worktree` are documented here.
 
-## [Unreleased]
+## [0.2.0] - 2026-09-04
+
+### Added
+
+- **Session binding (virtual cwd).** While a session owns an active worktree, built-in tool calls are re-rooted there via `tool_call`: bash starts inside the worktree, relative and omitted paths resolve against it, and `edit`/`write` aimed at the origin checkout are blocked with the worktree twin. The per-turn policy now states a single `Working root` instead of contradicting the handoff with origin-side facts.
+- **`/land` preview and choice.** One-line summary (commits, diff stat, uncommitted files, how far the origin moved) then rebase→ff (default), squash, merge, or edit the commit subject. Conflicts offer agent / abort / manual on the spot. Several children at the origin open a picker.
+- **`rebase` land strategy** (default): rebase the worktree onto the origin and fast-forward — linear history, no merge commit. Falls back to merge when the rebase conflicts, after aborting it.
+- **`worktree_abandon` tool**: discard a worktree; dry run without `confirm:true` reports what would be lost. Refuses `main`/`master`, other sessions' links, and running from inside the worktree.
+- Task text is stored on the link and drives the branch name (`wt-fix-login-retry`), the land commit subject, the widget and the session name.
+- Widget readiness: `↑ahead · ↓behind · N dirty`, refreshed after every agent run; terminal title follows the bound worktree.
+
+### Changed
+
+- Store is one file per link in `<git-common-dir>/pi-worktree/`; sessions only write their own link, ending the load-modify-save race between parallel sessions. Legacy `pi-worktree.json` migrates on first load.
+- `/worktree` grammar: every positional is task text; explicit branch names go through `--branch`. `/worktree cleanup` is a task again, not a branch.
+- `/worktree` with no task and no conversation creates the worktree and waits instead of triggering a turn that has nothing to infer.
+- Land/abandon restore the pre-worktree session name (or `✓ <branch>`).
+- Detached `HEAD` is now blocked on the target side too; squash with nothing new reports `nothing-to-land` instead of a conflict.
+- Target checkpoints are `wip(<branch>): checkpoint before landing …`; source checkpoints use the task as subject.
+
+### Verification
+
+- 35 tests passing (`npm test`), including re-rooting rules, per-link store isolation, legacy migration, rebase→ff and rebase-conflict fallback against real git.
+- `tsc --noEmit` clean.
+- Print-mode round trip against real Pi: `/worktree add retry tests --yes` → `wt-add-retry-tests` with carried changes → `/land` from inside the worktree lands as a single fast-forwarded commit titled `add retry tests`, cleans up, and restores the session name.
+
+## [0.1.1] - 2026-09-04
 
 ### Changed
 

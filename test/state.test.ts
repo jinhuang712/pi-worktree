@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,11 +9,15 @@ import {
   emptyStore,
   findByWorktree,
   foreignOwnerOf,
+  isInside,
   loadStore,
   markLanded,
   orderKidsForDisplay,
   ownerLabel,
+  saveLink,
   saveStore,
+  STORE_DIR,
+  storePath,
   upsertLink,
   ownActiveLink,
   visibleKidsFor,
@@ -111,7 +115,43 @@ test("disk roundtrip tolerates missing/corrupt files", async () => {
   const empty = await loadStore(dir);
   assert.equal(empty.links.length, 0);
   await saveStore(dir, upsertLink(emptyStore(), link()));
+  writeFileSync(join(dir, STORE_DIR, "garbage.json"), "{not json");
   const loaded = await loadStore(dir);
   assert.equal(loaded.links.length, 1);
   assert.equal(loaded.links[0].branch, "pi/x");
+});
+
+test("per-link files: a stale snapshot cannot clobber another session's link", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-worktree-state-"));
+  const a = link({ id: "a", worktreePath: "/repo.worktrees/wt-a", branch: "wt-a", sessionId: "A" });
+  const b = link({ id: "b", worktreePath: "/repo.worktrees/wt-b", branch: "wt-b", sessionId: "B" });
+  await saveLink(dir, a);
+  await saveLink(dir, b);
+  // Session A loaded both while B was active…
+  const snapshotA = await loadStore(dir);
+  // …then B lands and writes only its own file…
+  await saveLink(dir, { ...b, status: "landed", landedAt: 5 });
+  // …and A persists a change to its own link from the stale snapshot.
+  await saveLink(dir, { ...snapshotA.links.find((l) => l.id === "a")!, carried: false });
+  const now = await loadStore(dir);
+  assert.equal(findByWorktree(now, "/repo.worktrees/wt-b")?.status, "landed");
+  assert.equal(findByWorktree(now, "/repo.worktrees/wt-a")?.carried, false);
+});
+
+test("legacy single-file store migrates to per-link files once", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-worktree-state-"));
+  writeFileSync(storePath(dir), JSON.stringify({ version: 1, links: [link({ id: "legacy" })] }));
+  const loaded = await loadStore(dir);
+  assert.equal(loaded.links.length, 1);
+  assert.equal(loaded.links[0].id, "legacy");
+  assert.ok(existsSync(join(dir, STORE_DIR, "legacy.json")));
+  assert.ok(!existsSync(storePath(dir)));
+  assert.equal((await loadStore(dir)).links.length, 1);
+});
+
+test("isInside handles root, children and lookalike siblings", () => {
+  assert.equal(isInside("/repo", "/repo"), true);
+  assert.equal(isInside("/repo/src/a.ts", "/repo"), true);
+  assert.equal(isInside("/repo.worktrees/wt-x/a.ts", "/repo"), false);
+  assert.equal(isInside("/other", "/repo"), false);
 });

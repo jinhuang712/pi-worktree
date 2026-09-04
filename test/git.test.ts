@@ -4,9 +4,11 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  parseShortstat,
   parseWorktreePorcelain,
   resolveUniqueBranch,
   sanitizeBranchName,
+  slugFromTask,
   suggestBranchName,
   syncStoreWithGit,
   type ExecFn,
@@ -61,10 +63,28 @@ test("sanitizes hostile branch names", () => {
 
 test("suggests short wt- branches", () => {
   const d = new Date(2026, 8, 4, 10, 30);
-  assert.equal(suggestBranchName("main", d), "wt-0904-1030");
-  assert.equal(suggestBranchName("feat-x", d), "wt-feat-x-0904-1030");
-  assert.equal(suggestBranchName("pi/my-feature", d), "wt-pi-my-feature-0904-1030");
+  assert.equal(suggestBranchName("main", null, d), "wt-0904-1030");
+  assert.equal(suggestBranchName("feat-x", "", d), "wt-feat-x-0904-1030");
+  assert.equal(suggestBranchName("pi/my-feature", undefined, d), "wt-pi-my-feature-0904-1030");
   assert.match(suggestBranchName(null), /^wt-\d{4}-\d{4}$/);
+});
+
+test("task text names the branch when it has ASCII words", () => {
+  const d = new Date(2026, 8, 4, 10, 30);
+  assert.equal(slugFromTask("Fix the login retry bug"), "fix-login-retry");
+  assert.equal(slugFromTask("please add tests for parser"), "add-tests-parser");
+  assert.equal(slugFromTask("先补充测试用例"), "");
+  assert.equal(slugFromTask("cleanup"), "cleanup");
+  assert.ok(slugFromTask("internationalization localization accessibility").length <= 24);
+  assert.equal(suggestBranchName("main", "Fix the login retry bug", d), "wt-fix-login-retry");
+  assert.equal(suggestBranchName("feat-x", "Fix the login retry bug", d), "wt-feat-x-fix-login-retry");
+  assert.equal(suggestBranchName("main", "先补充测试用例", d), "wt-0904-1030");
+});
+
+test("parses diff --shortstat", () => {
+  assert.deepEqual(parseShortstat(" 3 files changed, 120 insertions(+), 8 deletions(-)"), { files: 3, insertions: 120, deletions: 8 });
+  assert.deepEqual(parseShortstat(" 1 file changed, 1 insertion(+)"), { files: 1, insertions: 1, deletions: 0 });
+  assert.deepEqual(parseShortstat(""), { files: 0, insertions: 0, deletions: 0 });
 });
 
 test("resolveUniqueBranch bumps on collision", async () => {  const taken = new Set(["wt-0904-1030", "wt-0904-1030-2"]);

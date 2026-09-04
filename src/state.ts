@@ -3,8 +3,14 @@
  *
  * Session entries alone are not enough: after `/worktree` the user typically
  * `cd`s into the new worktree and starts a fresh pi session with a different
- * cwd/session file. A small JSON file in the shared git dir keeps the
+ * cwd/session file. Small JSON files in the shared git dir keep the
  * origin <-> worktree mapping discoverable from either side.
+ *
+ * Layout: `<git-common-dir>/pi-worktree/<link-id>.json`, one file per link.
+ * Parallel sessions only ever write their own link file, so a stale in-memory
+ * snapshot in one session can never clobber another session's link — the
+ * classic load-modify-save race of a single shared JSON file is gone.
+ * The legacy single-file store (`pi-worktree.json`) is migrated on first load.
  */
 
 export interface WorktreeLink {
@@ -20,11 +26,16 @@ export interface WorktreeLink {
   status: "active" | "landed" | "removed";
   /** Owning pi session (getSessionId). Absent on legacy links = unowned. */
   sessionId?: string | null;
-  /** Session name snapshot at create time, for human-readable owner labels. */
+  /** Session name snapshot at create time, for human-readable owner labels
+   *  and for restoring the name after land/abandon. */
   sessionName?: string | null;
+  /** What the worktree is for — drives the land commit message. */
+  task?: string | null;
   landedAt?: number;
   landStrategy?: string;
   landSha?: string | null;
+  /** True when the worktree was discarded instead of landed. */
+  abandoned?: boolean;
 }
 
 export interface WorktreeStore {
@@ -33,9 +44,18 @@ export interface WorktreeStore {
 }
 
 export const STORE_FILE = "pi-worktree.json";
+export const STORE_DIR = "pi-worktree";
 
 export function storePath(commonDir: string): string {
   return `${commonDir.replace(/\/+$/, "")}/${STORE_FILE}`;
+}
+
+export function storeDir(commonDir: string): string {
+  return `${commonDir.replace(/\/+$/, "")}/${STORE_DIR}`;
+}
+
+function linkPath(commonDir: string, id: string): string {
+  return `${storeDir(commonDir)}/${id.replace(/[^A-Za-z0-9._-]/g, "_")}.json`;
 }
 
 export function emptyStore(): WorktreeStore {
@@ -61,33 +81,91 @@ export function samePath(a: string, b: string): boolean {
   return normalizePath(a) === normalizePath(b);
 }
 
-export async function loadStore(commonDir: string): Promise<WorktreeStore> {
+/** True when `p` is `root` or lives under it. */
+export function isInside(p: string, root: string): boolean {
+  const a = normalizePath(p);
+  const r = normalizePath(root);
+  return a === r || a.startsWith(r === "/" ? "/" : `${r}/`);
+}
+
+function isLink(l: unknown): l is WorktreeLink {
+  return !!l
+    && typeof (l as WorktreeLink).worktreePath === "string"
+    && typeof (l as WorktreeLink).id === "string";
+}
+
+async function readLegacy(commonDir: string): Promise<WorktreeLink[]> {
   try {
     const { readFile } = await import("node:fs/promises");
     const raw = await readFile(storePath(commonDir), "utf8");
     const parsed = JSON.parse(raw) as Partial<WorktreeStore>;
-    if (!parsed || !Array.isArray(parsed.links)) return emptyStore();
-    return {
-      version: 1,
-      links: parsed.links.filter(
-        (l): l is WorktreeLink =>
-          !!l && typeof (l as WorktreeLink).worktreePath === "string" && typeof (l as WorktreeLink).id === "string",
-      ),
-    };
+    return Array.isArray(parsed?.links) ? parsed.links.filter(isLink) : [];
   } catch {
-    return emptyStore();
+    return [];
   }
 }
 
-/** Atomic write (tmp + rename) so concurrent pi sessions do not tear the file. */
-export async function saveStore(commonDir: string, store: WorktreeStore): Promise<void> {
+async function readDir(commonDir: string): Promise<WorktreeLink[]> {
+  try {
+    const { readdir, readFile } = await import("node:fs/promises");
+    const dir = storeDir(commonDir);
+    const names = (await readdir(dir)).filter((n) => n.endsWith(".json"));
+    const out: WorktreeLink[] = [];
+    for (const n of names) {
+      try {
+        const parsed = JSON.parse(await readFile(`${dir}/${n}`, "utf8"));
+        if (isLink(parsed)) out.push(parsed);
+      } catch {
+        // Corrupt file: skip, never fail the whole store.
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+async function writeJsonAtomic(dest: string, value: unknown): Promise<void> {
   const { mkdir, writeFile, rename } = await import("node:fs/promises");
   const { dirname } = await import("node:path");
-  const dest = storePath(commonDir);
   await mkdir(dirname(dest), { recursive: true });
   const tmp = `${dest}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+  await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   await rename(tmp, dest);
+}
+
+/**
+ * Load every link. Per-link files win; a legacy single-file store is merged
+ * in and migrated to per-link files (then renamed aside) so it is read once.
+ */
+export async function loadStore(commonDir: string): Promise<WorktreeStore> {
+  const files = await readDir(commonDir);
+  const legacy = await readLegacy(commonDir);
+  const seen = new Set(files.map((l) => l.id));
+  const fresh = legacy.filter((l) => !seen.has(l.id));
+  if (fresh.length > 0) {
+    try {
+      for (const l of fresh) await writeJsonAtomic(linkPath(commonDir, l.id), l);
+      const { rename } = await import("node:fs/promises");
+      await rename(storePath(commonDir), `${storePath(commonDir)}.migrated`);
+    } catch {
+      // Migration is best-effort; the legacy file stays readable.
+    }
+  }
+  const links = [...files, ...fresh].sort((a, b) => a.createdAt - b.createdAt);
+  return { version: 1, links };
+}
+
+/** Persist one link. This is the only write path sessions should use for
+ *  their own links — it never touches other links on disk. */
+export async function saveLink(commonDir: string, link: WorktreeLink): Promise<void> {
+  await writeJsonAtomic(linkPath(commonDir, link.id), link);
+}
+
+/** Persist every link in `store` (per-link files). Prefer saveLink for
+ *  single mutations; this exists for tests and bulk repair. */
+export async function saveStore(commonDir: string, store: WorktreeStore): Promise<void> {
+  for (const l of store.links) await saveLink(commonDir, l);
 }
 
 export function upsertLink(store: WorktreeStore, link: WorktreeLink): WorktreeStore {
@@ -116,7 +194,7 @@ export function childrenOf(store: WorktreeStore, originPath: string): WorktreeLi
 export function markLanded(
   store: WorktreeStore,
   id: string,
-  patch: Partial<Pick<WorktreeLink, "status" | "landedAt" | "landStrategy" | "landSha">>,
+  patch: Partial<Pick<WorktreeLink, "status" | "landedAt" | "landStrategy" | "landSha" | "abandoned">>,
 ): WorktreeStore {
   return {
     version: 1,
@@ -152,7 +230,7 @@ export function ownerLabel(link: WorktreeLink, me: string | null | undefined): s
 
 /** Widget/status visibility: own links plus unowned legacy links (claimable by
  *  anyone). Foreign-owned links stay out of the glanceable chrome — they still
- *  appear in `/worktree status` and the model policy, so parallel work is not
+ *  appear in worktree_status and the model policy, so parallel work is not
  *  invisible where it matters. */
 export function visibleKidsFor(
   kids: WorktreeLink[],
@@ -186,6 +264,7 @@ export function orderKidsForDisplay(
   });
 }
 
-export function makeId(): string {  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+export function makeId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
   return `wt-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 }
