@@ -44,6 +44,8 @@ After creation the agent keeps working inside the new worktree on its own; when 
 
 Land the current linked worktree back into its origin.
 
+Direction is always what you mean: from the origin, naming a child (`/land wt-0904-1115`) lands that child here — never the reverse. Standing on `main`/`master` beside one unlinked worktree likewise lands it here. An explicit `--to` anywhere else stays a destination.
+
 1. Commits pending changes on both sides automatically (timestamped checkpoints, no prompts).
 3. Merges with `merge --no-edit` by default, or `--strategy squash`.
 4. On conflict, lists the conflicted files and leaves `MERGE_HEAD` in place. Resolve the files, `git add` them, then `/land --continue`. Abort with `/land --abort`. Both work no matter which side you invoke them from.
@@ -88,6 +90,7 @@ The TUI shows linkage as a one-line widget and footer status: children show `�
 - Never force-pushes; never pushes at all.
 - Never auto-deletes branches with `-D` (uses `-d`, and keeps the branch when worktree removal fails).
 - Stash apply tries `--index` first, falls back to plain apply, and drops the stash only on success.
+- Cleanup never touches `main`/`master`: no auto-delete, no `worktree remove` against a main working tree, no `branch -d main` suggestions — a reverse-land degrades to words, not dangerous commands.
 - Both sides auto-commit before merging (checkpoint messages); same-path and detached-`HEAD` lands are blocked with hints.
 
 ## Development

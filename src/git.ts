@@ -6,6 +6,13 @@
  * side-effect free for fast tests.
  */
 
+import {
+  loadStore,
+  normalizePath,
+  saveStore,
+  type WorktreeStore,
+} from "./state.ts";
+
 export interface ExecResult {
   stdout: string;
   stderr: string;
@@ -246,6 +253,36 @@ export async function dedupePath(basePath: string): Promise<string> {
     if (!existsSync(cand)) return cand;
   }
   return `${basePath}-${Date.now()}`;
+}
+
+/**
+ * Self-heal the linkage store against git reality: active links whose
+ * worktree no longer exists in `git worktree list` are marked removed.
+ * Stores lie (manual removals, hand edits, crashes) — git is truth. Without
+ * this, a stale store silently disables flip/ownership logic and the land
+ * flow falls back to guessing direction. Empty live lists (git failing)
+ * never wipe anything.
+ */
+export async function syncStoreWithGit(
+  exec: ExecFn,
+  cwd: string,
+  commonDir: string,
+): Promise<WorktreeStore> {
+  const store = await loadStore(commonDir);
+  const live = new Set((await listWorktrees(exec, cwd)).map((w) => normalizePath(w.path)));
+  if (live.size === 0) return store;
+  let changed = false;
+  const links = store.links.map((l) => {
+    if (l.status === "active" && !live.has(normalizePath(l.worktreePath))) {
+      changed = true;
+      return { ...l, status: "removed" as const, landedAt: Date.now() };
+    }
+    return l;
+  });
+  if (!changed) return store;
+  const next: WorktreeStore = { ...store, links };
+  await saveStore(commonDir, next);
+  return next;
 }
 
 export interface CarryResult {

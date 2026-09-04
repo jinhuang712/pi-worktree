@@ -42,6 +42,7 @@ import {
   resolveUniqueBranch,
   sanitizeBranchName,
   suggestBranchName,
+  syncStoreWithGit,
   unmergedFiles,
   ensureCommitted,
   type ExecFn,
@@ -91,9 +92,18 @@ async function displayPath(absPath: string, fromDir: string): Promise<string> {
   return rel && !rel.startsWith("..") ? `./${rel}` : rel || ".";
 }
 
-function truncateMiddle(s: string, max = 60): string {
-  if (s.length <= max) return s;
+function truncateMiddle(s: string, max = 60): string {  if (s.length <= max) return s;
   return `${s.slice(0, max - 1)}…`;
+}
+
+/** Load linkage self-healed against `git worktree list`; falls back to the raw
+ *  store when git is unavailable so reads never break. */
+async function loadSyncedStore(exec: ExecFn, cwd: string, commonDir: string) {
+  try {
+    return await syncStoreWithGit(exec, cwd, commonDir);
+  } catch {
+    return loadStore(commonDir);
+  }
 }
 
 function shortSha(sha: string | null): string {
@@ -218,7 +228,7 @@ async function refreshChrome(
       return;
     }
     const canon = await canonicalPath(facts.topLevel);
-    const store = facts.commonDir ? await loadStore(facts.commonDir) : null;
+    const store = facts.commonDir ? await loadSyncedStore(exec, cwd, facts.commonDir) : null;
     const link = store ? activeLinkFor(store, canon) ?? findByWorktree(store, canon) : undefined;
     const kids = store ? childrenOf(store, canon) : [];
     if (link && link.status === "active") {
@@ -474,7 +484,7 @@ export default function (pi: ExtensionAPI) {
         sessionId: ctx.sessionManager.getSessionId(),
         sessionName: pi.getSessionName() ?? null,
       };
-      const store = await loadStore(commonDir);
+      const store = await loadSyncedStore(exec, cwd, commonDir);
       await saveStore(commonDir, upsertLink(store, link));
       pi.appendEntry(LINK_ENTRY, link);
       await recordEvent({ kind: "create", ...link, reason: params.reason ?? null });
@@ -554,7 +564,7 @@ export default function (pi: ExtensionAPI) {
     const commonDir = await getCommonDir(exec, cwd);
     if (!commonDir) return { text: "Cannot resolve git dir.", details: { ok: false, reason: "no-common-dir" } };
     const canon = await canonicalPath(topLevel);
-    const store = await loadStore(commonDir);
+    const store = await loadSyncedStore(exec, cwd, commonDir);
 
     // Resolve source (where the feature commits live) and target (origin).
     // Invoked from the child side (normal): source = here, target = origin.
@@ -602,6 +612,20 @@ export default function (pi: ExtensionAPI) {
           targetPath = opts.to;
         }
       }
+      // DWIM: naming a linked child of the current location means
+      // "land that child here" — never "merge here into the child".
+      // (Only when standing outside any own link, i.e. the origin side;
+      // from inside a child, an explicit target stays a destination.)
+      if (targetPath && !activeLinkFor(store, canon)) {
+        const named = findByWorktree(store, targetPath);
+        if (named && named.status === "active" && samePath(named.originPath, canon) && !samePath(targetPath, canon)) {
+          link = named;
+          sourcePath = await canonicalPath(named.worktreePath);
+          sourceBranch = named.branch;
+          targetPath = canon;
+          targetBranch = (await collectFacts(exec, cwd))?.branch ?? named.originBranch ?? undefined;
+        }
+      }
     }
     if (!targetPath) {
       // Fallback: the other worktree when exactly two exist.
@@ -610,6 +634,17 @@ export default function (pi: ExtensionAPI) {
       if (others.length === 1) {
         targetPath = await canonicalPath(others[0].path);
         targetBranch = others[0].branch ?? undefined;
+        // DWIM: standing on main/master beside one feature worktree means
+        // "land it here" — merging main into the child is never the guess.
+        const hereBranch = (await collectFacts(exec, cwd))?.branch;
+        const hereIsMain = hereBranch === "main" || hereBranch === "master";
+        const otherIsMain = targetBranch === "main" || targetBranch === "master";
+        if (hereIsMain && !otherIsMain) {
+          sourcePath = targetPath;
+          sourceBranch = targetBranch ?? null;
+          targetPath = canon;
+          targetBranch = hereBranch ?? undefined;
+        }
       } else {
         const names = others.map((w) => `${w.branch ?? "?"} @ ${w.path}`).join("\n") || "(none)";
         return {
@@ -779,11 +814,17 @@ export default function (pi: ExtensionAPI) {
     sourceBranch: string,
     targetPath: string,
   ): Promise<string> {
-    // Never auto-remove the worktree the user is sitting in without them
-    // opting in interactively — report the exact follow-up instead.
+    // main/master are never auto-deleted, and a main working tree is never
+    // removed — a reverse-land must degrade to words, not dangerous commands.
+    if (sourceBranch === "main" || sourceBranch === "master") {
+      return `Kept branch \`${sourceBranch}\` — never auto-delete it. Worktree left in place.`;
+    }
     const removal = await removeWorktree(exec, targetPath, sourcePath);
     if (removal.code !== 0) {
       const err = `${removal.stdout}\n${removal.stderr}`.trim().slice(0, 800);
+      if (/main working tree|not a working tree/i.test(err)) {
+        return `Cleanup skipped — ${sourcePath} is not a removable worktree. Branch \`${sourceBranch}\` kept.`;
+      }
       return `Cleanup skipped (run manually): \`git -C ${targetPath} worktree remove ${sourcePath}\` — ${err}\nThen \`git branch -d ${sourceBranch}\` if merged.`;
     }
     const del = await deleteBranch(exec, targetPath, sourceBranch);
@@ -974,7 +1015,7 @@ export default function (pi: ExtensionAPI) {
         sessionId: ctx.sessionManager.getSessionId(),
         sessionName: pi.getSessionName() ?? null,
       };
-      const store = await loadStore(commonDir);
+      const store = await loadSyncedStore(exec, cwd, commonDir);
       await saveStore(commonDir, upsertLink(store, link));
       pi.appendEntry(LINK_ENTRY, link);
       await recordEvent({ kind: "create", ...link });

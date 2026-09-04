@@ -11,6 +11,8 @@ All notable changes to `pi-worktree` are documented here.
 - `/land` from the origin side auto-flips to the single active child, and dirty targets are checkpoint-committed instead of erroring.
 - Display overhaul: two-line result cards (full output one expand away), short widget/status lines, no absolute-path repetition, session renamed to the worktree branch for session isolation.
 - Session-exclusive worktrees: links record the owning session; landing another session's active link is blocked for tools and confirm-gated for `/land` (standing inside the worktree counts as possession, so cd-and-land keeps working). The widget/status show only own plus unowned links; the full list stays in `/worktree status` and the model policy.
+- Self-healing linkage: every land/widget/create pass reconciles the store against `git worktree list`, so externally removed worktrees stop haunting flip/ownership logic — never hand-edit the JSON.
+- DWIM land direction: naming a linked child from its origin lands it here; standing on `main` beside one unlinked worktree lands it here. Cleanup never suggests deleting `main`/`master` or removing a main working tree.
 
 ## [0.1.0] - 2026-09-04
 
