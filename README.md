@@ -1,27 +1,21 @@
-# pi-worktree-land
+# pi-worktree
 
 A native [Pi](https://github.com/badlogic/pi-mono) extension for git worktree flow: `/worktree` isolates current changes into a linked worktree, `/land` merges them back with conflict handling.
 
-`pi-worktree-land` shells out to your own `git` for all repository mutations and keeps an origin↔worktree linkage file inside the shared git dir, so the mapping survives `cd` plus fresh Pi sessions on either side. The agent gets three tools (`worktree_status`, `worktree_create`, `worktree_land`) and a short per-turn policy: when the workspace is clean and the task is experimental, risky, or parallel, it proactively isolates instead of editing in place.
+`pi-worktree` shells out to your own `git` for all repository mutations and keeps an origin↔worktree linkage file inside the shared git dir, so the mapping survives `cd` plus fresh Pi sessions on either side. The agent gets three tools (`worktree_status`, `worktree_create`, `worktree_land`) and a short per-turn policy: when the workspace is clean and the task is experimental, risky, or parallel, it proactively isolates instead of editing in place.
 
 ## Installation
 
 Install the public GitHub package:
 
 ```bash
-pi install git:github.com/jinhuang712/pi-worktree-land
-```
-
-Or from npm:
-
-```bash
-pi install npm:pi-worktree-land
+pi install git:github.com/jinhuang712/pi-worktree
 ```
 
 Or install it locally while developing:
 
 ```bash
-pi install -l /absolute/path/to/pi-worktree-land
+pi install -l /absolute/path/to/pi-worktree
 ```
 
 Restart Pi after installation so it discovers the extension.

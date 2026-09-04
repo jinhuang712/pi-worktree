@@ -1,5 +1,5 @@
 {
-  "name": "pi-worktree-land",
+  "name": "pi-worktree",
   "version": "0.1.0",
   "description": "Native Pi worktree flow: /worktree isolates changes into a new git worktree, /land merges back with conflict handling. Clean workspaces are encouraged to isolate proactively.",
   "private": false,
@@ -7,12 +7,12 @@
   "keywords": ["pi-package", "pi-extension", "pi", "git", "worktree"],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jinhuang712/pi-worktree-land.git"
+    "url": "git+https://github.com/jinhuang712/pi-worktree.git"
   },
   "bugs": {
-    "url": "https://github.com/jinhuang712/pi-worktree-land/issues"
+    "url": "https://github.com/jinhuang712/pi-worktree/issues"
   },
-  "homepage": "https://github.com/jinhuang712/pi-worktree-land#readme",
+  "homepage": "https://github.com/jinhuang712/pi-worktree#readme",
   "files": [
     "src",
     "README.md",
