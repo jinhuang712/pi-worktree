@@ -21,6 +21,7 @@ export const WORKTREE_GUIDELINES = [
   "Use worktree_status to check git cleanliness before risky edits; use worktree_create to isolate experimental work and worktree_land to merge a linked worktree back.",
   "When the workspace is CLEAN and the task is experimental, risky, or explicitly parallel, proactively offer or call worktree_create instead of editing in place.",
   "Never run raw `git worktree add/remove` shell commands; use the worktree_* tools so origin linkage stays consistent.",
+  "When work in a linked worktree is finished, ask the user before calling worktree_land — never land or merge silently.",
 ];
 
 export function buildPolicySection(f: PolicyFacts): string {
@@ -29,7 +30,7 @@ export function buildPolicySection(f: PolicyFacts): string {
   lines.push(`- Current worktree: ${where}, ${f.clean ? "CLEAN" : "DIRTY"}, ${f.worktreeCount} worktree(s) total.`);
   if (f.isLinkedChild) {
     lines.push(
-      `- This worktree was created by /worktree${f.originBranch ? ` from \`${f.originBranch}\`` : ""}${f.originPath ? ` at \`${f.originPath}\`` : ""}. Keep all edits inside this worktree and finish with worktree_land (or tell the user to run /land).`,
+      `- This worktree was created by /worktree${f.originBranch ? ` from \`${f.originBranch}\`` : ""}${f.originPath ? ` at \`${f.originPath}\`` : ""}. Keep all edits inside this worktree. When the work is done, ask the user whether to land instead of landing silently; run worktree_land (or tell the user to run /land) only after confirmation.`,
     );
   } else if ((f.childCount ?? 0) > 0) {
     const kids = (f.childBranches ?? []).slice(0, 5).map((b) => `\`${b}\``).join(", ");
