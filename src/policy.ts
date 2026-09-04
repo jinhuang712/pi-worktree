@@ -24,10 +24,14 @@ export const WORKTREE_GUIDELINES = [
   "When work in a linked worktree is finished, ask the user before calling worktree_land — never land or merge silently.",
 ];
 
+function plural(n: number, noun: string): string {
+  return n === 1 ? `1 ${noun}` : `${n} ${noun}s`;
+}
+
 export function buildPolicySection(f: PolicyFacts): string {
   const lines: string[] = ["## pi-worktree policy (native)"];
   const where = f.branch ? `branch \`${f.branch}\`` : "detached HEAD";
-  lines.push(`- Current worktree: ${where}, ${f.clean ? "CLEAN" : "DIRTY"}, ${f.worktreeCount} worktree(s) total.`);
+  lines.push(`- Current worktree: ${where}, ${f.clean ? "CLEAN" : "DIRTY"}, ${plural(f.worktreeCount, "worktree")}.`);
   if (f.isLinkedChild) {
     lines.push(
       `- This worktree was created by /worktree${f.originBranch ? ` from \`${f.originBranch}\`` : ""}${f.originPath ? ` at \`${f.originPath}\`` : ""}. Keep all edits inside this worktree. When the work is done, ask the user whether to land instead of landing silently; run worktree_land (or tell the user to run /land) only after confirmation.`,
@@ -35,7 +39,7 @@ export function buildPolicySection(f: PolicyFacts): string {
   } else if ((f.childCount ?? 0) > 0) {
     const kids = (f.childBranches ?? []).slice(0, 5).map((b) => `\`${b}\``).join(", ");
     lines.push(
-      `- This is an origin with ${f.childCount} active linked worktree(s)${kids ? `: ${kids}` : ""}. Do not edit the same files here in parallel; land children with worktree_land before reusing their branches.`,
+      `- This is an origin with ${plural(f.childCount ?? 0, "active linked worktree")}${kids ? `: ${kids}` : ""}. Do not edit the same files here in parallel; land children with worktree_land before reusing their branches.`,
     );
   } else if (f.clean) {
     lines.push(

@@ -18,6 +18,7 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
@@ -38,6 +39,7 @@ import {
   pruneWorktrees,
   refExists,
   removeWorktree,
+  resolveUniqueBranch,
   sanitizeBranchName,
   suggestBranchName,
   unmergedFiles,
@@ -62,6 +64,7 @@ import {
 
 const WIDGET_KEY = "pi-worktree";
 const STATUS_KEY = "pi-worktree";
+const CARD_TYPE = "pi-worktree";
 const LINK_ENTRY = "pi-worktree-link";
 const EVENT_ENTRY = "pi-worktree-event";
 
@@ -71,6 +74,22 @@ function makeExec(
 ): (cwd: string) => ExecFn {
   return (cwd: string) => (cmd, args, opts) =>
     pi.exec(cmd, args, { signal, timeout: opts?.timeout, cwd: opts?.cwd ?? cwd });
+}
+
+function pluralWorktree(n: number): string {
+  return n === 1 ? "1 worktree" : `${n} worktrees`;
+}
+
+/** Compact human display, relative to the session cwd (e.g. `../repo.worktrees/wt-0904-1111`). */
+async function displayPath(absPath: string, fromDir: string): Promise<string> {
+  const { relative } = await import("node:path");
+  const rel = relative(fromDir, absPath);
+  return rel && !rel.startsWith("..") ? `./${rel}` : rel || ".";
+}
+
+function truncateMiddle(s: string, max = 60): string {
+  if (s.length <= max) return s;
+  return `${s.slice(0, max - 1)}…`;
 }
 
 function shortSha(sha: string | null): string {
@@ -199,13 +218,14 @@ async function refreshChrome(
     const link = store ? activeLinkFor(store, canon) ?? findByWorktree(store, canon) : undefined;
     const kids = store ? childrenOf(store, canon) : [];
     if (link && link.status === "active") {
-      const line = `🌲 ${link.branch} → origin ${link.originBranch ?? "?"} (${link.originPath})`;
-      ctx.ui.setWidget(WIDGET_KEY, [line]);
+      const dest = link.originBranch ?? "origin";
+      ctx.ui.setWidget(WIDGET_KEY, [`🌲 ${link.branch} → ${dest}`]);
       ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `wt: ${link.branch}`));
     } else if (kids.length > 0) {
-      const names = kids.map((k) => k.branch).slice(0, 3).join(", ");
-      ctx.ui.setWidget(WIDGET_KEY, [`🌲 origin: ${kids.length} worktree(s): ${names}`]);
-      ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `wt-origin: ${kids.length}`));
+      const shown = kids.map((k) => k.branch).slice(0, 3).join(" · ");
+      const more = kids.length > 3 ? ` +${kids.length - 3}` : "";
+      ctx.ui.setWidget(WIDGET_KEY, [`🌲 ${pluralWorktree(kids.length)} · ${shown}${more}`]);
+      ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `wt: ${pluralWorktree(kids.length)}`));
     } else {
       ctx.ui.setWidget(WIDGET_KEY, undefined);
       ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -252,6 +272,38 @@ function formatWorktreeList(
 export default function (pi: ExtensionAPI) {
   const getExec = (cwd: string, signal?: AbortSignal): ExecFn =>
     makeExec(pi, signal)(cwd);
+
+  // Compact result cards: the full handoff text stays in message content for
+  // the model, but humans only see two lines (branch · task + dim rel path).
+  // Full output remains one expand away. Failures render in full — they need it.
+  pi.registerMessageRenderer(CARD_TYPE, (message, opts, theme) => {
+    const full = typeof message.content === "string" ? message.content : "";
+    const d = message.details as
+      | { kind: "create"; branch: string; rel: string; task: string; carried: boolean }
+      | { kind: "land"; ok: boolean; branch: string; dest: string; strategy: string; sha: string | null; note: string }
+      | undefined;
+    if (opts.expanded || !d || (d.kind !== "create" && d.kind !== "land") || (d.kind === "land" && !d.ok)) {
+      return new Text(full, opts.outputPad, 0);
+    }
+    if (d.kind === "create") {
+      const head = d.task
+        ? `🌲 ${d.branch} · ${truncateMiddle(d.task)}`
+        : `🌲 ${d.branch}`;
+      const tail = d.carried ? ` · carried changes` : "";
+      return new Text(
+        `${theme.fg("accent", head)}\n${theme.fg("dim", `${d.rel}${tail}`)}`,
+        opts.outputPad,
+        0,
+      );
+    }
+    const head = `🌲 landed ${d.branch} → ${d.dest}`;
+    const tail = `${d.strategy} · ${shortSha(d.sha)}${d.note ? ` · ${d.note}` : ""}`;
+    return new Text(
+      `${theme.fg("accent", head)}\n${theme.fg("dim", tail)}`,
+      opts.outputPad,
+      0,
+    );
+  });
 
   async function recordEvent(data: Record<string, unknown>): Promise<void> {
     try {
@@ -331,9 +383,13 @@ export default function (pi: ExtensionAPI) {
       const originHead = facts?.head ?? null;
 
       const rawBranch = (params.branch ?? "").trim();
-      const branch = sanitizeBranchName(rawBranch) || sanitizeBranchName(suggestBranchName(originBranch));
+      const explicitBranch = sanitizeBranchName(rawBranch);
+      // Explicit names still error on collision (typo visibility); auto names
+      // bump (-2/-3…) so parallel sessions never block each other.
+      const branch = explicitBranch
+        || await resolveUniqueBranch(exec, cwd, sanitizeBranchName(suggestBranchName(originBranch)));
       if (!branch) throw new Error("worktree_create: cannot determine a valid branch name.");
-      if (await branchExists(exec, cwd, branch)) {
+      if (explicitBranch && await branchExists(exec, cwd, branch)) {
         return {
           content: [{ type: "text", text: `Error: branch \`${branch}\` already exists. Pick another name or run \`git worktree add <path> ${branch}\` manually.` }],
           details: { ok: false, reason: "branch-exists", branch },
@@ -602,7 +658,7 @@ export default function (pi: ExtensionAPI) {
         : opts.remove ? "Linkage not found — worktree left in place; remove manually with `git worktree remove <path>`." : "";
       return {
         text: `Merge concluded in ${mergeDir} (${shortSha(sha)}).\n${out}${cleanup ? `\n${cleanup}` : ""}`,
-        details: { ok: true, finished: true, sha, target: mergeDir, cleanup },
+        details: { ok: true, finished: true, sha, target: mergeDir, cleanup, branch: effLink?.branch ?? sourceBranch, dest: effLink?.originBranch ?? undefined },
       };
     }
 
@@ -658,7 +714,7 @@ export default function (pi: ExtensionAPI) {
     const cleanup = opts.remove ? await cleanupWorktree(exec, commonDir, store, link, sourcePath, sourceBranch, targetPath) : "";
     return {
       text: [`Landed \`${sourceBranch}\` into ${targetPath} (${opts.strategy}, ${shortSha(sha)}).`, targetCheckpoint ? `Target had pending changes — checkpointed as ${shortSha(targetCheckpoint)} before merging.` : "", merged.output, cleanup].filter(Boolean).join("\n"),
-      details: { ok: true, sha, target: targetPath, source: sourcePath, strategy: opts.strategy, cleanup, targetCheckpoint },
+      details: { ok: true, sha, target: targetPath, source: sourcePath, strategy: opts.strategy, cleanup, targetCheckpoint, branch: sourceBranch, dest: targetBranch },
     };
   }
 
@@ -776,23 +832,27 @@ export default function (pi: ExtensionAPI) {
       //   task text: branch auto-generates, text rides along as the task.
       const pos = parsed.positionals;
       let branch = "";
+      let explicitBranch = false;
       let task = "";
       let base = parsed.base;
       if (pos.length === 1 && isBranchLike(pos[0])) {
         branch = sanitizeBranchName(pos[0]);
+        explicitBranch = true;
       } else if (pos.length === 2 && isBranchLike(pos[0]) && !base && (await refExists(exec, cwd, pos[1]))) {
         branch = sanitizeBranchName(pos[0]);
+        explicitBranch = true;
         base = pos[1];
       } else if (pos.length > 0) {
         task = pos.join(" ");
       }
-      // Auto-generate branch when omitted or when input was task text (no prompt).
-      if (!branch) branch = sanitizeBranchName(suggestBranchName(facts.branch));
+      // Auto-generate when omitted or when input was task text (no prompt),
+      // bumping on collision so a fresh session never dead-ends.
+      if (!branch) branch = await resolveUniqueBranch(exec, cwd, sanitizeBranchName(suggestBranchName(facts.branch)));
       if (!branch) {
         emit(ctx, "Cannot determine a valid branch name.", "error");
         return;
       }
-      if (await branchExists(exec, cwd, branch)) {
+      if (explicitBranch && await branchExists(exec, cwd, branch)) {
         emit(ctx, `Branch \`${branch}\` already exists. Pick another name.`, "error");
         return;
       }
@@ -866,6 +926,14 @@ export default function (pi: ExtensionAPI) {
       await recordEvent({ kind: "create", ...link });
       await refreshChrome(pi, ctx, cwd);
 
+      // Bind the session to the worktree: the picker shows `🌲 wt-0904-1111`,
+      // so parallel sessions stay distinguishable (session ↔ worktree isolation).
+      try {
+        pi.setSessionName(`🌲 ${branch}${task ? ` · ${truncateMiddle(task, 40)}` : ""}`);
+      } catch {
+        // Non-fatal.
+      }
+
       const agentHandoff = task
         ? `User ran /worktree with extra text: "${task}". Work inside ${targetPath} — if the text is a real task, do it there; if it is vague chatter, infer the actual task from conversation history instead. When done, ask the user before landing — do NOT land without confirmation.`
         : `User ran /worktree with no extra text. Infer the pending task from conversation history and do it inside ${targetPath}; when done, ask the user before landing — do NOT land without confirmation.`;
@@ -882,7 +950,18 @@ export default function (pi: ExtensionAPI) {
       // the session idle looking script-like — do NOT use it here.
       if (!ctx.hasUI) emit(ctx, summary, "info");
       pi.sendMessage(
-        { customType: "pi-worktree", content: summary, display: true },
+        {
+          customType: CARD_TYPE,
+          content: summary,
+          display: true,
+          details: {
+            kind: "create",
+            branch,
+            rel: await displayPath(targetPath, cwd),
+            task,
+            carried,
+          },
+        },
         { triggerTurn: true },
       );
     },
@@ -959,11 +1038,41 @@ export default function (pi: ExtensionAPI) {
 
       // Same one-shot rule as /worktree: the result card hands off to the model
       // (summarize / continue) instead of leaving the session idle script-like.
+      // details feed the compact card renderer; failures render full text.
       if (!ctx.hasUI) emit(ctx, result.text, result.details.ok ? "info" : "error");
-      pi.sendMessage(
-        { customType: "pi-worktree", content: result.text, display: true },
-        { triggerTurn: true },
-      );
+      {
+        const rd = result.details as {
+          ok?: boolean; sha?: string | null; strategy?: LandStrategy;
+          cleanup?: string; branch?: string | null; dest?: string;
+          source?: string; target?: string; targetCheckpoint?: string | null;
+        };
+        const { basename } = await import("node:path");
+        const cleanup = typeof rd.cleanup === "string" ? rd.cleanup : "";
+        const note = rd.targetCheckpoint
+          ? `checkpoint ${shortSha(rd.targetCheckpoint)}`
+          : cleanup.startsWith("Cleaned up")
+            ? "cleaned up"
+            : cleanup.startsWith("Cleanup skipped")
+              ? "kept"
+              : "";
+        pi.sendMessage(
+          {
+            customType: CARD_TYPE,
+            content: result.text,
+            display: true,
+            details: {
+              kind: "land",
+              ok: rd.ok === true,
+              branch: rd.branch ?? (rd.source ? basename(rd.source) : "?"),
+              dest: rd.dest ?? (rd.target ? basename(rd.target) : "?"),
+              strategy: rd.strategy ?? parsed.strategy,
+              sha: rd.sha ?? null,
+              note,
+            },
+          },
+          { triggerTurn: true },
+        );
+      }
       const topAfter = await getTopLevel(exec, cwd);
       if (topAfter) await refreshChrome(pi, ctx, topAfter);
     },

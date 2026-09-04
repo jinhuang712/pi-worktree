@@ -196,13 +196,31 @@ export function sanitizeBranchName(input: string): string {
   return s.slice(0, 200);
 }
 
+/**
+ * Suggest a short, flat auto branch name: `wt-<base>-<MMDD-HHMM>`
+ * (`wt-0904-1111` on main/master). Flat `wt-*` keeps the widget, the
+ * sibling `.worktrees` dir, and `git branch` output short. Pair with
+ * resolveUniqueBranch so minute-resolution stamps never hard-fail.
+ */
 export function suggestBranchName(originBranch: string | null, now = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, "0");
-  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
-  const base = originBranch && originBranch !== "main" && originBranch !== "master"
-    ? sanitizeBranchName(originBranch)
-    : "work";
-  return `pi/${base}-${stamp}`;
+  const stamp = `${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
+  const rawBase = originBranch && originBranch !== "main" && originBranch !== "master"
+    ? sanitizeBranchName(originBranch).replace(/\//g, "-")
+    : "";
+  const base = rawBase.slice(0, 24).replace(/-+$/, "");
+  return base ? `wt-${base}-${stamp}` : `wt-${stamp}`;
+}
+
+/** Bump `candidate` with -2/-3… until no branch collides. For auto names only;
+ *  explicit user-supplied branches still error so typos stay visible. */
+export async function resolveUniqueBranch(exec: ExecFn, cwd: string, candidate: string): Promise<string> {
+  if (!(await branchExists(exec, cwd, candidate))) return candidate;
+  for (let i = 2; i < 100; i++) {
+    const next = `${candidate}-${i}`;
+    if (!(await branchExists(exec, cwd, next))) return next;
+  }
+  return `${candidate}-${Date.now().toString(36)}`;
 }
 
 /**
