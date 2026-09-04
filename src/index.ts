@@ -87,26 +87,35 @@ function emit(ctx: ExtensionContext, text: string, level: "info" | "warning" | "
   (level === "error" ? console.error : console.log)(text);
 }
 
+/** True for ASCII branch-ish tokens (`my-feature`, `pi/x-1`). Anything else
+ *  (CJK, sentences, …) is task text, not a branch name. */
+function isBranchLike(token: string): boolean {
+  return /^[A-Za-z0-9._][A-Za-z0-9._/-]*$/.test(token) && token.length <= 200;
+}
+
 function parseWorktreeArgs(raw: string): {
   sub?: string;
-  branch?: string;
   base?: string;
   path?: string;
   carry: boolean;
   json: boolean;
+  yes: boolean;
+  /** Raw positionals; handler resolves branch vs task (needs async ref check). */
+  positionals: string[];
 } {
   const tokens = raw.trim().split(/\s+/).filter(Boolean);
   let sub: string | undefined;
-  let branch: string | undefined;
   let base: string | undefined;
   let path: string | undefined;
   let carry = true;
   let json = false;
+  let yes = false;
   const positionals: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
     if (t === "--no-carry") carry = false;
     else if (t === "--json") json = true;
+    else if (t === "--yes" || t === "-y") yes = true;
     else if (t === "--base" && tokens[i + 1]) base = tokens[++i];
     else if (t.startsWith("--base=")) base = t.slice("--base=".length);
     else if (t === "--path" && tokens[i + 1]) path = tokens[++i];
@@ -118,15 +127,10 @@ function parseWorktreeArgs(raw: string): {
     const first = positionals[0].toLowerCase();
     if (["list", "ls", "status", "st", "prune", "help"].includes(first)) {
       sub = first === "ls" ? "list" : first === "st" ? "status" : first;
-    } else {
-      branch = positionals[0];
-      if (positionals[1] && !base) {
-        // `/worktree <branch> <base>` convenience.
-        base = positionals[1];
-      }
+      return { sub, base, path, carry, json, yes, positionals: [] };
     }
   }
-  return { sub, branch, base, path, carry, json };
+  return { sub, base, path, carry, json, yes, positionals };
 }
 
 function parseLandArgs(raw: string): {
@@ -306,9 +310,10 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Isolate experimental work with worktree_create",
     promptGuidelines: [
       "Use worktree_create when the workspace is CLEAN and the task is experimental, risky, or explicitly parallel.",
+      "When work in the new worktree is finished, ask the user before landing instead of calling worktree_land silently.",
     ],
     parameters: Type.Object({
-      branch: Type.Optional(Type.String({ description: "New branch name. Auto-generated when omitted." })),
+      branch: Type.Optional(Type.String({ description: "New branch name. Omit unless the user explicitly names one — never copy task text. Auto-generated when omitted." })),
       base: Type.Optional(Type.String({ description: "Base ref for the new branch. Defaults to current HEAD." })),
       path: Type.Optional(Type.String({ description: "Worktree path. Defaults to a sibling .worktrees directory." })),
       carry: Type.Optional(Type.Boolean({ description: "Carry uncommitted changes via stash. Default true." })),
@@ -666,7 +671,7 @@ export default function (pi: ExtensionAPI) {
   // ------------------------------------------------------------ commands
 
   pi.registerCommand("worktree", {
-    description: "Create a linked worktree carrying current changes (or list/prune)",
+    description: "Create a linked worktree and start the task in it (or list/prune)",
     getArgumentCompletions: (prefix: string) => {
       const subs = ["list", "status", "prune", "help"];
       const filtered = subs.filter((s) => s.startsWith(prefix));
@@ -681,8 +686,10 @@ export default function (pi: ExtensionAPI) {
       if (parsed.sub === "help" || args.trim() === "--help" || args.trim() === "-h") {
         emit(ctx, 
           [
-            "/worktree [branch] [--base <ref>] [--path <path>] [--no-carry]",
+            "/worktree [branch] [task...] [--base <ref>] [--path <path>] [--no-carry] [--yes]",
             "/worktree list | status | prune",
+            "Branch/path auto-generate when omitted. Extra text is the task:",
+            "the agent continues it in the new worktree and asks before landing.",
             "Creates a linked worktree carrying uncommitted changes (stash). Clean trees take the fast path.",
           ].join("\n"),
           "info",
@@ -723,7 +730,8 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Create flow.
+      // Create flow: branch/path auto-generate when omitted — no manual input.
+      // Override via `/worktree <branch>` or `--path <path>`; skip confirm with `--yes`.
       const facts = await collectFacts(exec, cwd);
       if (!facts) {
         emit(ctx, "Not a git repository.", "error");
@@ -735,59 +743,58 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      let branch = sanitizeBranchName(parsed.branch ?? "");
+      // Resolve branch vs task from positionals:
+      // - `/worktree my-branch` → branch (single ASCII token).
+      // - `/worktree my-branch <base>` → branch + base when <base> is a real ref.
+      // - Anything else (`/worktree 开始吧`, `/worktree fix the login bug`) is
+      //   task text: branch auto-generates, text rides along as the task.
+      const pos = parsed.positionals;
+      let branch = "";
+      let task = "";
+      let base = parsed.base;
+      if (pos.length === 1 && isBranchLike(pos[0])) {
+        branch = sanitizeBranchName(pos[0]);
+      } else if (pos.length === 2 && isBranchLike(pos[0]) && !base && (await refExists(exec, cwd, pos[1]))) {
+        branch = sanitizeBranchName(pos[0]);
+        base = pos[1];
+      } else if (pos.length > 0) {
+        task = pos.join(" ");
+      }
+      // Auto-generate branch when omitted or when input was task text (no prompt).
+      if (!branch) branch = sanitizeBranchName(suggestBranchName(facts.branch));
       if (!branch) {
-        if (!ctx.hasUI) {
-          branch = sanitizeBranchName(suggestBranchName(facts.branch));
-        } else {
-          const input = await ctx.ui.input("New worktree branch", suggestBranchName(facts.branch));
-          if (!input) {
-            emit(ctx, "Cancelled.", "info");
-            return;
-          }
-          branch = sanitizeBranchName(input);
-          if (!branch) {
-            emit(ctx, `Invalid branch name: ${input}`, "error");
-            return;
-          }
-        }
+        emit(ctx, "Cannot determine a valid branch name.", "error");
+        return;
       }
       if (await branchExists(exec, cwd, branch)) {
         emit(ctx, `Branch \`${branch}\` already exists. Pick another name.`, "error");
         return;
       }
-      if (parsed.base && !(await refExists(exec, cwd, parsed.base))) {
-        emit(ctx, `Base ref \`${parsed.base}\` does not exist.`, "error");
+      if (base && !(await refExists(exec, cwd, base))) {
+        emit(ctx, `Base ref \`${base}\` does not exist.`, "error");
         return;
       }
 
+      // Auto-generate path when omitted (sibling .worktrees dir, deduped) — no prompt.
       const { resolve } = await import("node:path");
       const { mkdir } = await import("node:fs/promises");
       let targetPath: string;
       if (parsed.path) {
         targetPath = parsed.path.startsWith("/") ? parsed.path : resolve(cwd, parsed.path);
-      } else if (!ctx.hasUI) {
-        const { dir, path: dflt } = await defaultWorktreePath(facts.topLevel, branch);
-        await mkdir(dir, { recursive: true });
-        targetPath = await dedupePath(dflt);
       } else {
         const { dir, path: dflt } = await defaultWorktreePath(facts.topLevel, branch);
         await mkdir(dir, { recursive: true });
-        const picked = await ctx.ui.input("Worktree path", await dedupePath(dflt));
-        if (!picked) {
-          emit(ctx, "Cancelled.", "info");
-          return;
-        }
-        targetPath = picked.startsWith("/") ? picked : resolve(cwd, picked);
+        targetPath = await dedupePath(dflt);
       }
 
       const dirtyNote = facts.clean
         ? "Workspace CLEAN — fast path, ideal for isolation."
         : `Workspace DIRTY — ${facts.porcelain.split("\n").filter(Boolean).length} file(s) will be carried via stash.`;
-      if (ctx.hasUI && !parsed.json) {
+      // Dirty workspaces carry via stash — confirm once. Clean takes the fast path.
+      if (ctx.hasUI && !parsed.json && !parsed.yes && !facts.clean) {
         const ok = await ctx.ui.confirm(
           "Create worktree?",
-          `${dirtyNote}\nBranch: ${branch}\nPath: ${targetPath}\nBase: ${parsed.base ?? shortSha(facts.head)}`,
+          `${dirtyNote}\nBranch: ${branch}\nPath: ${targetPath}\nBase: ${base ?? shortSha(facts.head)}`,
         );
         if (!ok) {
           emit(ctx, "Cancelled.", "info");
@@ -795,7 +802,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      const created = await createWorktree(exec, cwd, { branch, path: targetPath, base: parsed.base }, ctx.signal ?? undefined);
+      const created = await createWorktree(exec, cwd, { branch, path: targetPath, base }, ctx.signal ?? undefined);
       if (!created.ok) {
         emit(ctx, `git worktree add failed:\n${created.output}`, "error");
         return;
@@ -822,7 +829,7 @@ export default function (pi: ExtensionAPI) {
         originHead: facts.head,
         worktreePath: await canonicalPath(targetPath),
         branch,
-        base: parsed.base ?? facts.head,
+        base: base ?? facts.head,
         carried,
         createdAt: Date.now(),
         status: "active",
@@ -833,12 +840,17 @@ export default function (pi: ExtensionAPI) {
       await recordEvent({ kind: "create", ...link });
       await refreshChrome(pi, ctx, cwd);
 
+      const agentHandoff = task
+        ? `Task: ${task}. Continue it inside ${targetPath}; when done, ask the user "可以 land 了吗？" — do NOT land without confirmation.`
+        : `Continue the pending work inside ${targetPath}; when done, ask the user "可以 land 了吗？" — do NOT land without confirmation.`;
       const summary = [
         `Worktree ready: \`${branch}\` at ${targetPath}`,
         carryNote,
-        `Next: \`cd ${targetPath}\` then continue; finish with /land.`,
+        agentHandoff,
+        `(Session cwd stays at the origin — work with \`cd ${targetPath} && ...\` / absolute paths, keep all edits in the new worktree.)`,
       ].join("\n");
-      emit(ctx, summary, "info");
+      // The card below is the visible confirmation; skip emit with UI to avoid duplicates.
+      if (!ctx.hasUI) emit(ctx, summary, "info");
       pi.sendMessage(
         { customType: "pi-worktree", content: summary, display: true },
         { deliverAs: "nextTurn" },
