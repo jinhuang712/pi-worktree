@@ -1,12 +1,13 @@
 /**
  * pi-worktree — native git worktree flow for pi.
  *
- * - `/worktree [branch]` isolates current changes into a new worktree
- *   (stash-carry when dirty, fast path when clean).
- * - `/land` merges the current linked worktree back into its origin,
- *   with conflict surfacing (`--continue` / `--abort`) and safe cleanup.
- * - Tools (`worktree_status` / `worktree_create` / `worktree_land`) let the
- *   agent check cleanliness and isolate proactively in clean workspaces.
+ * Two user commands, everything else belongs to the model:
+ * - `/worktree [task]` isolates work into a new worktree and hands the task
+ *   to the agent (stash-carry when dirty, fast path when clean).
+ * - `/land` merges the linked worktree back into its origin, handling
+ *   direction, conflicts and cleanup via the agent.
+ * - Status, prune, conflict continuation and strategy choices live in the
+ *   worktree_* tools + policy, not in user-facing flags.
  *
  * Linkage is stored in `<git-common-dir>/pi-worktree.json` so it survives
  * `cd` + fresh sessions on either side, plus session entries for the
@@ -128,22 +129,22 @@ function isBranchLike(token: string): boolean {
 }
 
 function parseWorktreeArgs(raw: string): {
-  sub?: string;
   base?: string;
   path?: string;
   carry: boolean;
   json: boolean;
   yes: boolean;
+  help: boolean;
   /** Raw positionals; handler resolves branch vs task (needs async ref check). */
   positionals: string[];
 } {
   const tokens = raw.trim().split(/\s+/).filter(Boolean);
-  let sub: string | undefined;
   let base: string | undefined;
   let path: string | undefined;
   let carry = true;
   let json = false;
   let yes = false;
+  let help = false;
   const positionals: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
@@ -154,65 +155,10 @@ function parseWorktreeArgs(raw: string): {
     else if (t.startsWith("--base=")) base = t.slice("--base=".length);
     else if (t === "--path" && tokens[i + 1]) path = tokens[++i];
     else if (t.startsWith("--path=")) path = t.slice("--path=".length);
-    else if (t === "--help" || t === "-h") sub = "help";
+    else if (t === "--help" || t === "-h") help = true;
     else if (!t.startsWith("--")) positionals.push(t);
   }
-  if (!sub && positionals.length > 0) {
-    const first = positionals[0].toLowerCase();
-    if (["list", "ls", "status", "st", "prune", "help"].includes(first)) {
-      sub = first === "ls" ? "list" : first === "st" ? "status" : first;
-      return { sub, base, path, carry, json, yes, positionals: [] };
-    }
-  }
-  return { sub, base, path, carry, json, yes, positionals };
-}
-
-function parseLandArgs(raw: string): {
-  to?: string;
-  strategy: LandStrategy;
-  message?: string;
-  remove: boolean;
-  yes: boolean;
-  json: boolean;
-  cont: boolean;
-  abort: boolean;
-  status: boolean;
-} {
-  const tokens = raw.trim().split(/\s+/).filter(Boolean);
-  let to: string | undefined;
-  let strategy: LandStrategy = "merge";
-  let message: string | undefined;
-  let remove = true;
-  let yes = false;
-  let json = false;
-  let cont = false;
-  let abort = false;
-  let status = false;
-  for (let i = 0; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (t === "--continue") cont = true;
-    else if (t === "--abort") abort = true;
-    else if (t === "--status") status = true;
-    else if (t === "--yes" || t === "-y") yes = true;
-    else if (t === "--json") json = true;
-    else if (t === "--no-remove") remove = false;
-    else if ((t === "--strategy" || t === "--how") && tokens[i + 1]) {
-      strategy = tokens[++i] === "squash" ? "squash" : "merge";
-    } else if (t.startsWith("--strategy=")) {
-      strategy = t.endsWith("squash") ? "squash" : "merge";
-    } else if ((t === "--to" || t === "--into") && tokens[i + 1]) {
-      to = tokens[++i];
-    } else if (t.startsWith("--to=")) {
-      to = t.slice("--to=".length);
-    } else if ((t === "-m" || t === "--message") && tokens[i + 1]) {
-      message = tokens[++i];
-    } else if (t.startsWith("--message=")) {
-      message = t.slice("--message=".length);
-    } else if (!t.startsWith("--")) {
-      to = to ?? t;
-    }
-  }
-  return { to, strategy, message, remove, yes, json, cont, abort, status };
+  return { base, path, carry, json, yes, help, positionals };
 }
 
 async function refreshChrome(
@@ -605,7 +551,7 @@ export default function (pi: ExtensionAPI) {
       } else if (kids.length > 1) {
         const names = kids.map((k) => `${k.branch} @ ${k.worktreePath}`).join("\n");
         return {
-          text: `Multiple active worktrees hang off this origin. Land one explicitly:\n${names}\nPass target (path or branch), e.g. /land --to <branch>.`,
+          text: `Multiple active worktrees hang off this origin. Specify which one (branch or path) and retry:\n${names}`,
           details: { ok: false, reason: "ambiguous-child", children: kids },
         };
       }
@@ -722,21 +668,16 @@ export default function (pi: ExtensionAPI) {
       return { text: r.code === 0 ? `Merge aborted in ${mergeDir}.\n${out}` : `Abort failed in ${mergeDir}.\n${out}`, details: { ok: r.code === 0, dir: mergeDir } };
     }
 
-    // Finish an in-progress merge (normally in the target).
+    // Finish an in-progress merge (normally in the target). Re-running /land
+    // after resolving + `git add` concludes automatically — no flags needed.
     if (opts.finish || mergeDir) {
       if (!mergeDir) {
         return { text: "No merge in progress — nothing to finish.", details: { ok: false, reason: "no-merge" } };
       }
       const unmerged = await unmergedFiles(exec, mergeDir);
-      if (unmerged.length > 0 && !opts.finish) {
-        return {
-          text: `Merge in progress in ${targetPath} with conflicts:\n${unmerged.map((f) => `  ${f}`).join("\n")}\nResolve files, \`git add\` them, then re-run with finish:true (or /land --continue).`,
-          details: { ok: false, reason: "conflict", conflicted: unmerged, target: targetPath },
-        };
-      }
       if (unmerged.length > 0) {
         return {
-          text: `Still conflicted:\n${unmerged.map((f) => `  ${f}`).join("\n")}\nResolve and \`git add\` before finishing.`,
+          text: `Merge in progress in ${targetPath} with conflicts:\n${unmerged.map((f) => `  ${f}`).join("\n")}\nResolve files, \`git add\` them, then finish the land (worktree_land finish:true). To abandon it, abort (worktree_land abort:true).`,
           details: { ok: false, reason: "conflict", conflicted: unmerged, target: targetPath },
         };
       }
@@ -800,7 +741,7 @@ export default function (pi: ExtensionAPI) {
         text: [
           `Merge conflict landing \`${sourceBranch}\` into ${targetPath} (${opts.strategy}).`,
           merged.conflicted.length > 0 ? `Conflicted files:\n${merged.conflicted.map((f) => `  ${f}`).join("\n")}` : merged.output,
-          `Resolve files in ${targetPath}, \`git add\` them, then run /land --continue (or worktree_land finish:true). Abort with /land --abort.`,
+          `Resolve files in ${targetPath}, \`git add\` them, then finish the land (worktree_land finish:true). To abandon it, abort (worktree_land abort:true).`,
         ].join("\n"),
         details: { ok: false, reason: "conflict", conflicted: merged.conflicted, target: targetPath, source: sourcePath, output: merged.output },
       };
@@ -860,29 +801,29 @@ export default function (pi: ExtensionAPI) {
   // ------------------------------------------------------------ commands
 
   pi.registerCommand("worktree", {
-    description: "Create a linked worktree and start the task in it (or list/prune)",
-    getArgumentCompletions: (prefix: string) => {
-      const subs = ["list", "status", "prune", "help"];
-      const filtered = subs.filter((s) => s.startsWith(prefix));
-      return filtered.length > 0 ? filtered.map((s) => ({ value: s, label: s })) : null;
-    },
+    description: "Isolate work in a fresh linked worktree — the agent continues the task there",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const cwd = ctx.cwd;
       const exec = getExec(cwd, ctx.signal ?? undefined);
       const parsed = parseWorktreeArgs(args);
       const topLevel = await getTopLevel(exec, cwd);
 
-      if (parsed.sub === "help" || args.trim() === "--help" || args.trim() === "-h") {
-        emit(ctx, 
+      if (parsed.help) {
+        emit(ctx,
           [
-            "/worktree [branch] [task...] [--base <ref>] [--path <path>] [--no-carry] [--yes]",
-            "/worktree list | status | prune",
-            "Branch/path auto-generate when omitted. Extra text is the task:",
-            "the agent continues it in the new worktree and asks before landing.",
-            "Creates a linked worktree carrying uncommitted changes (stash). Clean trees take the fast path.",
+            "/worktree [task...] — isolate work in a fresh worktree; the agent continues there.",
+            "/land — merge the worktree back when done.",
+            "Status, conflicts and cleanup are the agent's job — just describe what you want.",
           ].join("\n"),
           "info",
         );
+        return;
+      }
+
+      // Retired subcommands: point at the agent instead of managing anything.
+      if (parsed.positionals.length === 1 && !parsed.base && !parsed.path
+        && ["list", "ls", "status", "st", "prune"].includes(parsed.positionals[0].toLowerCase())) {
+        emit(ctx, "Worktree 状态和清理不用你操心 — 直接告诉 agent 要做什么，剩下的它来。", "info");
         return;
       }
 
@@ -891,49 +832,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (parsed.sub === "prune") {
-        // Heal the linkage store too: externally removed worktrees stop haunting it.
-        let healed = 0;
-        try {
-          const cdir = await getCommonDir(exec, cwd);
-          if (cdir) {
-            const before = await loadStore(cdir);
-            const after = await loadSyncedStore(exec, cwd, cdir);
-            healed = after.links.filter((l) => l.status !== "active" && before.links.find((b) => b.id === l.id)?.status === "active").length;
-          }
-        } catch {
-          // Non-fatal; git prune below still runs.
-        }
-        const r = await pruneWorktrees(exec, cwd);
-        const extra = healed > 0 ? ` Healed ${healed} stale link(s).` : "";
-        emit(ctx, r.code === 0 ? `Pruned stale worktree metadata.${extra}` : `Prune failed:\n${r.stderr.trim()}`, r.code === 0 ? "info" : "error");
-        return;
-      }
-
-      if (parsed.sub === "list" || parsed.sub === "status") {
-        const facts = await collectFacts(exec, cwd);
-        if (!facts) {
-          emit(ctx, "Not a git repository.", "error");
-          return;
-        }
-        const commonDir = facts.commonDir;
-        const store = commonDir ? await loadStore(commonDir) : null;
-        const canon = await canonicalPath(facts.topLevel);
-        const link = store ? (activeLinkFor(store, canon) ?? findByWorktree(store, canon)) : undefined;
-        const kids = store ? childrenOf(store, canon) : [];
-        const text = formatWorktreeList(facts.topLevel, facts.branch, facts.clean, facts.porcelain, facts.worktrees, link, kids, ctx.sessionManager.getSessionId());
-        emit(ctx, text, "info");
-        if (parsed.json) {
-          pi.sendMessage(
-            { customType: "pi-worktree", content: text, display: false },
-            { deliverAs: "nextTurn" },
-          );
-        }
-        return;
-      }
-
-      // Create flow: branch/path auto-generate when omitted — no manual input.
-      // Override via `/worktree <branch>` or `--path <path>`; skip confirm with `--yes`.
+      // Create flow: branch auto-generates (wt-*), extra text rides as the task.
       const facts = await collectFacts(exec, cwd);
       if (!facts) {
         emit(ctx, "Not a git repository.", "error");
@@ -1100,74 +999,22 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("land", {
-    description: "Land the current linked worktree back into its origin (handles conflicts)",
-    getArgumentCompletions: (prefix: string) => {
-      const flags = ["--continue", "--abort", "--status", "--strategy ", "--to ", "--no-remove", "--yes"];
-      const filtered = flags.filter((f) => f.startsWith(prefix));
-      return filtered.length > 0 ? filtered.map((f) => ({ value: f, label: f })) : null;
-    },
-    handler: async (args: string, ctx: ExtensionCommandContext) => {
+    description: "Merge the linked worktree back into its origin — direction, conflicts and cleanup are the agent's job",
+    handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      // Bare by design: anything after /land is ignored. Talk to the agent
+      // for strategy choices, conflict resolution, or landing elsewhere.
+      void _args;
       const cwd = ctx.cwd;
       const exec = getExec(cwd, ctx.signal ?? undefined);
-      const parsed = parseLandArgs(args);
-
-      if (parsed.status) {
-        const facts = await collectFacts(exec, cwd);
-        if (!facts) {
-          emit(ctx, "Not a git repository.", "error");
-          return;
-        }
-        const store = facts.commonDir ? await loadStore(facts.commonDir) : null;
-        const canon = await canonicalPath(facts.topLevel);
-        const link = store ? (activeLinkFor(store, canon) ?? findByWorktree(store, canon)) : undefined;
-        const kids = store ? childrenOf(store, canon) : [];
-        const merging = await hasMergeHead(exec, cwd);
-        emit(ctx, 
-          `${formatWorktreeList(facts.topLevel, facts.branch, facts.clean, facts.porcelain, facts.worktrees, link, kids, ctx.sessionManager.getSessionId())}${merging ? "\nMERGE_HEAD present — merge in progress." : ""}`,
-          "info",
-        );
-        return;
-      }
-
-      // Interactive target resolution when linkage is missing.
-      let to = parsed.to;
-      if (!to && !parsed.cont && !parsed.abort) {
-        const topLevel = await getTopLevel(exec, cwd);
-        if (topLevel) {
-          const commonDir = await getCommonDir(exec, cwd);
-          const store = commonDir ? await loadStore(commonDir) : null;
-          const canon = await canonicalPath(topLevel);
-          const link = store ? activeLinkFor(store, canon) ?? findByWorktree(store, canon) : undefined;
-          if (!link && ctx.hasUI) {
-            const wts = await listWorktrees(exec, cwd);
-            const others = wts.filter((w) => w.path !== canon && !w.bare);
-            if (others.length > 1) {
-              const labels = others.map((w) => `${w.branch ?? "?"} @ ${w.path}`);
-              const picked = await ctx.ui.select("Land into which worktree?", labels);
-              if (!picked) {
-                emit(ctx, "Cancelled.", "info");
-                return;
-              }
-              const hit = others[labels.indexOf(picked)];
-              to = hit?.path;
-            }
-          }
-        }
-      }
-
-      // No commit-message prompt: checkpoint messages auto-generate inside landFlow.
-      // Prompting here stalls the one-shot flow (and ui.input ignores placeholders).
 
       const result = await landFlow(exec, cwd, {
-        to,
-        strategy: parsed.strategy,
-        message: parsed.message,
-        remove: parsed.remove,
-        finish: parsed.cont,
-        abort: parsed.abort,
+        strategy: "merge",
+        remove: true,
+        finish: false,
+        abort: false,
         interactive: true,
         sessionId: ctx.sessionManager.getSessionId(),
-        confirmForeign: ctx.hasUI && !parsed.yes
+        confirmForeign: ctx.hasUI
           ? async (foreign) => {
             const who = foreign.map((l) => `\`${l.branch}\` ${ownerLabel(l, ctx.sessionManager.getSessionId())}`).join(", ");
             return ctx.ui.confirm("Land another session's worktree?", `${who} is owned by a different session. Land it anyway?`);
@@ -1204,7 +1051,7 @@ export default function (pi: ExtensionAPI) {
               ok: rd.ok === true,
               branch: rd.branch ?? (rd.source ? basename(rd.source) : "?"),
               dest: rd.dest ?? (rd.target ? basename(rd.target) : "?"),
-              strategy: rd.strategy ?? parsed.strategy,
+              strategy: rd.strategy ?? "merge",
               sha: rd.sha ?? null,
               note,
             },

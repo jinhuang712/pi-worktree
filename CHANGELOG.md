@@ -14,6 +14,7 @@ All notable changes to `pi-worktree` are documented here.
 - Self-healing linkage: every land/widget/create pass reconciles the store against `git worktree list`, so externally removed worktrees stop haunting flip/ownership logic — never hand-edit the JSON.
 - DWIM land direction: naming a linked child from its origin lands it here; standing on `main` beside one unlinked worktree lands it here. Cleanup never suggests deleting `main`/`master` or removing a main working tree.
 - One active worktree per session per repo: repeat creates are blocked with a pointer back at the owned link (land it first). `/worktree prune` now also heals stale store links.
+- Two-command surface: `/worktree` (create one-shot) and `/land` (bare one-shot). `list`/`status`/`prune` subcommands and all `/land` flags are gone from user space — status, prune, conflict continuation and strategy live in the tools + policy for the model. Sync also prunes git metadata quietly, so no manual prune entry is needed.
 
 ## [0.1.0] - 2026-09-04
 
