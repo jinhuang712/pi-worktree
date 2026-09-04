@@ -15,6 +15,7 @@ import {
   ownerLabel,
   saveStore,
   upsertLink,
+  visibleKidsFor,
   type WorktreeLink,
 } from "../src/state.ts";
 
@@ -75,6 +76,14 @@ test("session exclusivity: foreign links gate, own/unowned/possession pass", () 
   assert.equal(ownerLabel(others, "sess-other"), "(you)");
   assert.equal(ownerLabel({ ...others, sessionName: null }, "sess-me"), "(session sess-oth)");
   assert.equal(ownerLabel(legacy, "sess-me"), "");
+});
+
+test("visibleKidsFor hides foreign-owned links", () => {
+  const mine = link({ id: "m", worktreePath: "/repo.worktrees/wt-m", branch: "wt-m", sessionId: "me" });
+  const theirs = link({ id: "t", worktreePath: "/repo.worktrees/wt-t", branch: "wt-t", sessionId: "other" });
+  const legacy = link({ id: "l", worktreePath: "/repo.worktrees/wt-l", branch: "wt-l" });
+  assert.deepEqual(visibleKidsFor([mine, theirs, legacy], "me", "/repo").map((k) => k.branch), ["wt-m", "wt-l"]);
+  assert.deepEqual(visibleKidsFor([theirs], "me", "/repo"), []);
 });
 
 test("origin widget orders own links first", () => {

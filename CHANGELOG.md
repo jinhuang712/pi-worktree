@@ -10,7 +10,7 @@ All notable changes to `pi-worktree` are documented here.
 - Auto branches are short flat `wt-*` (`wt-0904-1111`) and bump `-2`/`-3` on collision, so fresh sessions never hit `already exists`; explicit names still error to keep typos visible.
 - `/land` from the origin side auto-flips to the single active child, and dirty targets are checkpoint-committed instead of erroring.
 - Display overhaul: two-line result cards (full output one expand away), short widget/status lines, no absolute-path repetition, session renamed to the worktree branch for session isolation.
-- Session-exclusive worktrees: links record the owning session; landing another session's active link is blocked for tools and confirm-gated for `/land` (standing inside the worktree counts as possession, so cd-and-land keeps working).
+- Session-exclusive worktrees: links record the owning session; landing another session's active link is blocked for tools and confirm-gated for `/land` (standing inside the worktree counts as possession, so cd-and-land keeps working). The widget/status show only own plus unowned links; the full list stays in `/worktree status` and the model policy.
 
 ## [0.1.0] - 2026-09-04
 

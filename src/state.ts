@@ -150,6 +150,18 @@ export function ownerLabel(link: WorktreeLink, me: string | null | undefined): s
   return `(session ${link.sessionId.slice(0, 8)})`;
 }
 
+/** Widget/status visibility: own links plus unowned legacy links (claimable by
+ *  anyone). Foreign-owned links stay out of the glanceable chrome — they still
+ *  appear in `/worktree status` and the model policy, so parallel work is not
+ *  invisible where it matters. */
+export function visibleKidsFor(
+  kids: WorktreeLink[],
+  me: string | null | undefined,
+  herePath: string,
+): WorktreeLink[] {
+  return kids.filter((k) => !foreignOwnerOf(k, me, herePath));
+}
+
 /** Display order for the origin widget: own links first, then the rest. */
 export function orderKidsForDisplay(
   kids: WorktreeLink[],
