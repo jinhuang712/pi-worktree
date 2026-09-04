@@ -62,6 +62,7 @@ import {
   samePath,
   saveStore,
   upsertLink,
+  visibleKidsFor,
   type WorktreeLink,
 } from "./state.ts";
 
@@ -225,17 +226,20 @@ async function refreshChrome(
       ctx.ui.setWidget(WIDGET_KEY, [`🌲 ${link.branch} → ${dest}`]);
       ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `wt: ${link.branch}`));
     } else if (kids.length > 0) {
-      // Visibility is intentional (git state is repo-global); exclusivity is
-      // enforced on land, and marked here: own links first and plain,
-      // other sessions' links tagged so "why do I see theirs" is self-evident.
+      // Glanceable chrome shows only mine + claimable unowned links.
+      // Foreign-owned links are hidden here (they remain in `/worktree status`
+      // and the model policy), so the widget reads as "my session's worktrees".
       const me = ctx.sessionManager.getSessionId();
-      const ordered = orderKidsForDisplay(kids, me);
-      const shown = ordered.slice(0, 3)
-        .map((k) => (foreignOwnerOf(k, me, canon) ? `${k.branch} (other)` : k.branch))
-        .join(" · ");
-      const more = kids.length > 3 ? ` +${kids.length - 3}` : "";
-      ctx.ui.setWidget(WIDGET_KEY, [`🌲 ${pluralWorktree(kids.length)} · ${shown}${more}`]);
-      ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `wt: ${pluralWorktree(kids.length)}`));
+      const visible = orderKidsForDisplay(visibleKidsFor(kids, me, canon), me);
+      if (visible.length === 0) {
+        ctx.ui.setWidget(WIDGET_KEY, undefined);
+        ctx.ui.setStatus(STATUS_KEY, undefined);
+        return;
+      }
+      const shown = visible.slice(0, 3).map((k) => k.branch).join(" · ");
+      const more = visible.length > 3 ? ` +${visible.length - 3}` : "";
+      ctx.ui.setWidget(WIDGET_KEY, [`🌲 ${pluralWorktree(visible.length)} · ${shown}${more}`]);
+      ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `wt: ${pluralWorktree(visible.length)}`));
     } else {
       ctx.ui.setWidget(WIDGET_KEY, undefined);
       ctx.ui.setStatus(STATUS_KEY, undefined);
