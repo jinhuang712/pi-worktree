@@ -31,32 +31,24 @@ From the current branch, create a new linked worktree carrying the associated ch
 - New worktrees default to `<repo>.worktrees/<branch>` (slashes become dashes), deduplicated with `-2`, `-3`, and so on.
 
 ```text
-/worktree              # one shot: auto wt-* branch, agent continues the task there
-/worktree my-feature   # explicit branch, still one shot
-/worktree my-feature "fix the login bug"  # branch + task
-/worktree list
-/worktree prune
+/worktree 先补充测试用例
+/worktree
 ```
 
 After creation the agent keeps working inside the new worktree on its own; when done it asks whether to land. Finish with `/land`. One session owns at most one active worktree per repo — creating again points back at the owned link until it is landed.
 
-### `/land [--to <path|branch>] [--strategy merge|squash] [-m <msg>] [--no-remove] [--yes]`
+Status, prune, conflict continuation and strategy choices are the agent's job — just describe what you want in chat.
 
-Land the current linked worktree back into its origin.
+### `/land`
 
-Direction is always what you mean: from the origin, naming a child (`/land wt-0904-1115`) lands that child here — never the reverse. Standing on `main`/`master` beside one unlinked worktree likewise lands it here. An explicit `--to` anywhere else stays a destination.
+Land the linked worktree back into its origin. Bare by design: direction, both-side auto-commit, conflict handling and cleanup all resolve through the agent.
 
 1. Commits pending changes on both sides automatically (timestamped checkpoints, no prompts).
-3. Merges with `merge --no-edit` by default, or `--strategy squash`.
-4. On conflict, lists the conflicted files and leaves `MERGE_HEAD` in place. Resolve the files, `git add` them, then `/land --continue`. Abort with `/land --abort`. Both work no matter which side you invoke them from.
-5. On success, marks the linkage landed and cleans up (`worktree remove` plus `branch -d`) unless `--no-remove`.
+2. Merges with `merge --no-edit`. On conflict, the agent resolves (or discusses) with you in chat and finishes on its own — re-running `/land` after you `git add` resolved files also concludes it.
+3. On success, marks the linkage landed and cleans up (`worktree remove` plus `branch -d`).
 
 ```text
 /land
-/land --strategy squash -m "land(pi/my-feature): concise summary"
-/land --status
-/land --continue
-/land --abort
 ```
 
 ## Agent tools

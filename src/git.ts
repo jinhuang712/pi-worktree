@@ -279,10 +279,18 @@ export async function syncStoreWithGit(
     }
     return l;
   });
-  if (!changed) return store;
-  const next: WorktreeStore = { ...store, links };
-  await saveStore(commonDir, next);
-  return next;
+  if (changed) {
+    const next: WorktreeStore = { ...store, links };
+    await saveStore(commonDir, next);
+    // Quiet git-side maintenance so no manual `prune` entry point is needed.
+    try {
+      await pruneWorktrees(exec, cwd);
+    } catch {
+      // Non-fatal.
+    }
+    return next;
+  }
+  return store;
 }
 
 export interface CarryResult {
