@@ -18,6 +18,10 @@ export interface WorktreeLink {
   carried: boolean;
   createdAt: number;
   status: "active" | "landed" | "removed";
+  /** Owning pi session (getSessionId). Absent on legacy links = unowned. */
+  sessionId?: string | null;
+  /** Session name snapshot at create time, for human-readable owner labels. */
+  sessionName?: string | null;
   landedAt?: number;
   landStrategy?: string;
   landSha?: string | null;
@@ -120,7 +124,32 @@ export function markLanded(
   };
 }
 
-export function makeId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+/**
+ * Session exclusivity: a worktree belongs to the session that created it.
+ * Returns the link when it is owned by a *different* live session, else undefined.
+ * Unowned legacy links (no sessionId) and the owner's own links are free to land.
+ * Standing inside the worktree itself also passes (physical possession — e.g. a
+ * fresh session after `cd` into it), so the cd-and-land flow keeps working.
+ */
+export function foreignOwnerOf(
+  link: WorktreeLink | undefined,
+  me: string | null | undefined,
+  herePath: string,
+): WorktreeLink | undefined {
+  if (!link || link.status !== "active") return undefined;
+  if (!link.sessionId || !me || link.sessionId === me) return undefined;
+  if (samePath(herePath, link.worktreePath)) return undefined;
+  return link;
+}
+
+/** Short human label for an owner: `(you)`, `(“name”)`, `(session abc12345)`, or `""` when unowned. */
+export function ownerLabel(link: WorktreeLink, me: string | null | undefined): string {
+  if (!link.sessionId) return "";
+  if (me && link.sessionId === me) return "(you)";
+  if (link.sessionName) return `("${link.sessionName}")`;
+  return `(session ${link.sessionId.slice(0, 8)})`;
+}
+
+export function makeId(): string {  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
   return `wt-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 }
