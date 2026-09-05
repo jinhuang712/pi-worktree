@@ -8,6 +8,7 @@ import {
   carryChangesViaStash,
   collectFacts,
   createWorktree,
+  diffNames,
   ensureCommitted,
   listWorktrees,
   mergeInto,
@@ -51,6 +52,7 @@ test("create + stash-carry + land clean merge", async () => {
 
   const carry = await carryChangesViaStash(exec, origin, wtPath, "pi-worktree:test");
   assert.equal(carry.carried, true, JSON.stringify(carry));
+  assert.equal((await sh(origin, ["stash", "list"])).out.trim(), "");
 
   const originFacts = await collectFacts(exec, origin);
   assert.equal(originFacts?.clean, true);
@@ -139,4 +141,36 @@ test("merge conflict surfaces conflicted files", async () => {
   assert.equal(merged.ok, false);
   assert.ok(merged.conflicted.includes("a.txt"), JSON.stringify(merged));
   await sh(origin, ["merge", "--abort"]);
+});
+
+test("selective stash-carry moves only chosen paths", async () => {
+  const origin = await initRepo();
+  // Related change (tracked edit) + unrelated change (untracked file).
+  writeFileSync(join(origin, "a.txt"), "one+dirty\n");
+  writeFileSync(join(origin, "b.txt"), "unrelated\n");
+
+  const wtPath = join(`${origin}.worktrees`, "pi-e2e-sel");
+  const created = await createWorktree(exec, origin, { branch: "pi/e2e-sel", path: wtPath });
+  assert.equal(created.ok, true, created.output);
+
+  const carry = await carryChangesViaStash(exec, origin, wtPath, "pi-worktree:test", undefined, ["a.txt"]);
+  assert.equal(carry.carried, true, JSON.stringify(carry));
+  assert.equal(carry.selective, true);
+  assert.equal(readFileSync(join(wtPath, "a.txt"), "utf8"), "one+dirty\n");
+
+  // Unrelated change stays in the origin; the stash is dropped.
+  assert.equal(readFileSync(join(origin, "b.txt"), "utf8"), "unrelated\n");
+  assert.equal((await sh(origin, ["stash", "list"])).out.trim(), "");
+  const wtFacts = await collectFacts(exec, wtPath);
+  assert.ok(wtFacts && !wtFacts.clean);
+});
+
+test("diffNames lists files changed on the branch", async () => {
+  const origin = await initRepo();
+  await sh(origin, ["checkout", "-qb", "feature"]);
+  writeFileSync(join(origin, "a.txt"), "changed\n");
+  writeFileSync(join(origin, "b.txt"), "added\n");
+  await sh(origin, ["add", "-A"]);
+  await sh(origin, ["commit", "-qm", "feature work"]);
+  assert.deepEqual(await diffNames(exec, origin, "main", "HEAD"), ["a.txt", "b.txt"]);
 });

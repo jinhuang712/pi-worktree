@@ -19,7 +19,7 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { rewriteToolInput, type Binding } from "./bind.ts";
@@ -34,6 +34,7 @@ import {
   dedupePath,
   defaultWorktreePath,
   deleteBranch,
+  diffNames,
   diffStat,
   ensureCommitted,
   getCommonDir,
@@ -43,6 +44,7 @@ import {
   isDetached,
   listWorktrees,
   mergeInto,
+  porcelainPaths,
   pruneWorktrees,
   refExists,
   removeWorktree,
@@ -63,12 +65,15 @@ import {
   findByWorktree,
   foreignOwnerOf,
   loadStore,
+  loadPrefs,
   makeId,
   orderKidsForDisplay,
   ownerLabel,
   ownActiveLink,
   saveLink,
+  savePrefs,
   samePath,
+  validStrategy,
   visibleKidsFor,
   type WorktreeLink,
   type WorktreeStore,
@@ -92,13 +97,6 @@ function makeExec(pi: ExtensionAPI, signal?: AbortSignal): (cwd: string) => Exec
 
 function pluralWorktree(n: number): string {
   return n === 1 ? "1 worktree" : `${n} worktrees`;
-}
-
-/** Compact human display, relative to the session cwd (e.g. `../repo.worktrees/wt-x`). */
-async function displayPath(absPath: string, fromDir: string): Promise<string> {
-  const { relative } = await import("node:path");
-  const rel = relative(fromDir, absPath);
-  return rel && !rel.startsWith("..") ? `./${rel}` : rel || ".";
 }
 
 function truncateMiddle(s: string, max = 60): string {
@@ -136,13 +134,6 @@ function subjectFromTask(task: string | null | undefined, fallback: string): str
   return first ? truncateMiddle(first, 72) : fallback;
 }
 
-function fmtStat(s: DiffStat): string {
-  const parts = [`${s.files} file${s.files === 1 ? "" : "s"}`];
-  if (s.insertions) parts.push(`+${s.insertions}`);
-  if (s.deletions) parts.push(`−${s.deletions}`);
-  return parts.join(" ");
-}
-
 /** `/worktree` grammar: every positional is task text; the branch is `--branch`. */
 function parseWorktreeArgs(raw: string): {
   branch?: string;
@@ -178,6 +169,33 @@ function parseWorktreeArgs(raw: string): {
     else if (!t.startsWith("--")) words.push(t);
   }
   return { branch, base, path, carry, json, yes, help, task: words.join(" ") };
+}
+
+/** `/land [target] [--strategy rebase|merge|squash]` — everything optional.
+ *  An explicit --strategy wins for this run and becomes the remembered default. */
+function parseLandArgs(raw: string): {
+  target?: string;
+  strategy?: Strategy;
+  badStrategy?: string;
+  help: boolean;
+} {
+  const tokens = raw.trim().split(/\s+/).filter(Boolean);
+  let target: string | undefined;
+  let strategy: Strategy | undefined;
+  let badStrategy: string | undefined;
+  let help = false;
+  const takeStrategy = (s: string) => {
+    if (validStrategy(s)) strategy = s;
+    else if (badStrategy === undefined) badStrategy = s;
+  };
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === "--help" || t === "-h") help = true;
+    else if (t === "--strategy" && tokens[i + 1]) takeStrategy(tokens[++i]);
+    else if (t.startsWith("--strategy=")) takeStrategy(t.slice("--strategy=".length));
+    else if (!t.startsWith("--") && target === undefined) target = t;
+  }
+  return { target, strategy, badStrategy, help };
 }
 
 function formatWorktreeList(
@@ -315,36 +333,135 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Compact result cards: the full text stays in message content for the
-  // model, humans see two lines. Full output is one expand away.
+  // Transcript visual language: every pi-worktree block is purple
+  // (toolPendingBg). A caps LABEL plus the hero in 【】 lead; detail lines
+  // align under the hero with `|-` trees for item lists. Emoji mark the
+  // family: 🌲 worktree ops, ⚠️ conflicts, 🗑️ abandon, ❌ errors.
+  // Cards signal state changes with the smallest effective payload —
+  // explanations and decisions belong to the model's own words, and full
+  // output is one expand away.
+  interface CheckpointInfo {
+    branch: string;
+    side: "source" | "target";
+    paths: string[];
+    subject: string;
+  }
+
+  interface LandView {
+    ok: boolean; branch: string; dest: string; strategy: string; sha: string | null;
+    ahead?: number; stat?: DiffStat; names?: string[]; subjects?: string[];
+    checkpoints?: CheckpointInfo[]; kept?: string | null; finished?: boolean;
+    conflicted?: string[]; reason?: string;
+  }
+
   type CardDetails =
-    | { kind: "create"; branch: string; rel: string; task: string; carried: boolean }
-    | { kind: "land"; ok: boolean; branch: string; dest: string; strategy: string; sha: string | null; note: string; conflicted?: string[]; reason?: string }
-    | { kind: "abandon"; ok: boolean; branch: string; commits: number; reason?: string };
+    | { kind: "create"; from: string; branch: string; carried: string[]; total: number; selective: boolean; clean: boolean }
+    | ({ kind: "land" } & LandView)
+    | { kind: "abandon"; ok: boolean; branch: string; commits: number; dirty: number; reason?: string }
+    | { kind: "error" };
+
+  /** worktree_status stays fully silent: pure triage plumbing, the model
+   *  speaks for it when anything is worth saying. */
+  function silentRender() {
+    return new Container();
+  }
+
+  const TREE_MAX_FILES = 6;
+  const TREE_MAX_COMMITS = 5;
+
+  function count(noun: string, n: number): string {
+    return `${n} ${noun}${n === 1 ? "" : "s"}`;
+  }
+
+  function treeLines(items: string[], max: number, indent: string): string[] {
+    const out = items.slice(0, max).map((f) => `${indent}|- ${f}`);
+    if (items.length > max) out.push(`${indent}|- … ${items.length - max} more`);
+    return out;
+  }
+
+  /** Spaces so continuations start under the hero: `E LABEL 【` counts
+   *  emoji 2 + spaces 1+1 + LABEL + 【 2. */
+  function heroIndent(label: string): string {
+    return " ".repeat(label.length + 6);
+  }
+
+  function firstLine(full: string): string {
+    return full.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+  }
+
+  function worktreeText(d: { from: string; branch: string; carried: string[]; total: number; selective: boolean; clean: boolean }, ink: { hero: (s: string) => string; dim: (s: string) => string; error: (s: string) => string }): string {
+    const pad = heroIndent("WORKTREE");
+    const head = `🌲 WORKTREE ${ink.hero(`【${d.from} -> ${d.branch}】`)}`;
+    if (d.clean) return [head, `${pad}${ink.dim("clean · nothing to carry")}`].join("\n");
+    const summary = d.carried.length === 0
+      ? "nothing carried"
+      : d.selective
+        ? `carrying ${d.carried.length} of ${d.total} files · ${d.total - d.carried.length} left in origin`
+        : `carrying ${count("file", d.carried.length)}`;
+    return [head, `${pad}${ink.dim(summary)}`, ...treeLines(d.carried, TREE_MAX_FILES, pad)].join("\n");
+  }
+
+  function landText(d: LandView, ink: { hero: (s: string) => string; dim: (s: string) => string; error: (s: string) => string }, full: string): string {
+    const hero = ink.hero(`【${d.branch} -> ${d.dest}】`);
+    if (!d.ok && d.reason === "conflict") {
+      const files = d.conflicted ?? [];
+      const pad = heroIndent("LAND CONFLICT");
+      return [
+        `⚠️ LAND CONFLICT ${hero}`,
+        `${pad}${ink.dim(`conflict in ${count("file", files.length)}`)}`,
+        ...treeLines(files, TREE_MAX_FILES, pad),
+      ].join("\n");
+    }
+    if (!d.ok && d.reason === "nothing-to-land") {
+      return [`🌲 LAND ${hero}`, `${heroIndent("LAND")}${ink.dim("nothing new · abandon to drop")}`].join("\n");
+    }
+    if (!d.ok) return ink.error(`❌ ${firstLine(full)}`);
+    const pad = heroIndent("LAND");
+    const meta = [d.strategy, d.sha ? shortSha(d.sha) : ""].filter(Boolean).join(" · ");
+    const lines = [`🌲 LAND ${hero}${meta ? ` ${ink.dim(`· ${meta}`)}` : ""}`];
+    for (const c of d.checkpoints ?? []) {
+      lines.push(`🌲 DIRTY WORKTREE ${ink.hero(`【${c.branch}】`)}`);
+      const cp = heroIndent("DIRTY WORKTREE");
+      lines.push(`${cp}${ink.dim(`checkpointed ${count("file", c.paths.length)} as "${truncateMiddle(c.subject, 48)}"`)}`);
+      lines.push(...treeLines(c.paths, TREE_MAX_FILES, cp));
+    }
+    if (d.finished) lines.push(`${pad}${ink.dim("merge concluded")}`);
+    if (d.ahead !== undefined) lines.push(`${pad}${ink.dim(`landing ${count("commit", d.ahead)}`)}`);
+    lines.push(...treeLines(d.subjects ?? [], TREE_MAX_COMMITS, pad));
+    if (d.stat) lines.push(`${pad}${ink.dim(`landing ${count("file", d.stat.files)}`)}`);
+    lines.push(...treeLines(d.names ?? [], TREE_MAX_FILES, pad));
+    if (d.kept) lines.push(`${pad}${ink.dim(d.kept)}`);
+    return lines.join("\n");
+  }
+
+  function abandonText(d: { branch: string; commits: number; dirty: number }, ink: { hero: (s: string) => string; dim: (s: string) => string; error: (s: string) => string }): string {
+    const bits: string[] = [];
+    if (d.commits) bits.push(count("commit", d.commits));
+    if (d.dirty) bits.push(count("dirty file", d.dirty));
+    return [`🗑️ ABANDON ${ink.hero(`【${d.branch}】`)}`, `${heroIndent("ABANDON")}${ink.dim(bits.length ? `${bits.join(" · ")} discarded` : "nothing discarded")}`].join("\n");
+  }
 
   pi.registerMessageRenderer(CARD_TYPE, (message, opts, theme) => {
     const full = typeof message.content === "string" ? message.content : "";
     const d = message.details as CardDetails | undefined;
-    if (opts.expanded || !d) return new Text(full, opts.outputPad, 0);
-    const two = (head: string, tail: string) => new Text(`${head}\n${theme.fg("dim", tail)}`, opts.outputPad, 0);
-
-    if (d.kind === "create") {
-      const head = d.task ? `🌲 ${d.branch} · ${truncateMiddle(d.task)}` : `🌲 ${d.branch}`;
-      return two(theme.fg("accent", head), `${d.rel}${d.carried ? " · carried changes" : ""}`);
-    }
+    const ink = {
+      hero: (s: string) => theme.fg("accent", theme.bold(s)),
+      dim: (s: string) => theme.fg("dim", s),
+      error: (s: string) => theme.fg("error", s),
+    };
+    const block = (text: string) => {
+      const box = new Box(opts.outputPad, 1, (t: string) => theme.bg("toolPendingBg", t));
+      box.addChild(new Text(text, 0, 0));
+      return box;
+    };
+    if (opts.expanded || !d) return block(full);
+    if (d.kind === "create") return block(worktreeText(d, ink));
+    if (d.kind === "land") return block(landText(d, ink, full));
     if (d.kind === "abandon") {
-      if (!d.ok) return two(theme.fg("error", `🗑 abandon ${d.branch} failed`), d.reason ?? "");
-      return two(theme.fg("warning", `🗑 abandoned ${d.branch}`), d.commits ? `${d.commits} commit${d.commits === 1 ? "" : "s"} discarded` : "no commits discarded");
+      if (!d.ok) return block(ink.error(`❌ ${firstLine(full)}`));
+      return block(abandonText(d, ink));
     }
-    if (!d.ok) {
-      if (d.reason === "conflict" && d.conflicted?.length) {
-        const files = d.conflicted.slice(0, 4).join(", ") + (d.conflicted.length > 4 ? ` +${d.conflicted.length - 4}` : "");
-        return two(theme.fg("error", `⚠ conflict landing ${d.branch} → ${d.dest}`), `${d.conflicted.length} file${d.conflicted.length === 1 ? "" : "s"}: ${files}`);
-      }
-      return new Text(full, opts.outputPad, 0);
-    }
-    const tail = `${d.strategy} · ${shortSha(d.sha)}${d.note ? ` · ${d.note}` : ""}`;
-    return two(theme.fg("success", `🌲 landed ${d.branch} → ${d.dest}`), tail);
+    return block(ink.error(`❌ ${firstLine(full)}`));
   });
 
   // ------------------------------------------------------------- create flow
@@ -354,13 +471,22 @@ export default function (pi: ExtensionAPI) {
     base?: string;
     path?: string;
     carry: boolean;
+    /** Carry only these pathspecs; omit to carry all uncommitted changes. */
+    carryPaths?: string[];
+    /** Tool path (model): collisions auto-bump (-2, -3). Command path
+     *  (human --branch): collisions stay a hard error (typo protection). */
+    autoBump?: boolean;
     task: string;
     reason?: string | null;
     sessionId: string | null;
   }
 
   type CreateResult =
-    | { ok: true; link: WorktreeLink; branch: string; path: string; carried: boolean; carryNote: string }
+    | {
+        ok: true; link: WorktreeLink; branch: string; path: string; carried: boolean; carryNote: string;
+        from: string | null; carriedPaths: string[]; totalDirty: number; selective: boolean; clean: boolean;
+        bumpedFrom: string | null;
+      }
     | { ok: false; reason: string; text: string; link?: WorktreeLink };
 
   async function createFlow(exec: ExecFn, cwd: string, opts: CreateOpts): Promise<CreateResult> {
@@ -384,10 +510,16 @@ export default function (pi: ExtensionAPI) {
     }
 
     const explicit = sanitizeBranchName(opts.branch ?? "");
-    const branch = explicit || await resolveUniqueBranch(exec, cwd, sanitizeBranchName(suggestBranchName(facts.branch, opts.task)));
+    let branch = explicit || await resolveUniqueBranch(exec, cwd, sanitizeBranchName(suggestBranchName(facts.branch, opts.task)));
+    let bumpedFrom: string | null = null;
     if (!branch) return { ok: false, reason: "bad-branch", text: "Cannot determine a valid branch name." };
     if (explicit && await branchExists(exec, cwd, branch)) {
-      return { ok: false, reason: "branch-exists", text: `Branch \`${branch}\` already exists. Pick another name.` };
+      if (!opts.autoBump) {
+        return { ok: false, reason: "branch-exists", text: `Branch \`${branch}\` already exists. Pick another name.` };
+      }
+      bumpedFrom = branch;
+      branch = await resolveUniqueBranch(exec, cwd, branch);
+      if (!branch) return { ok: false, reason: "bad-branch", text: "Cannot determine a valid branch name." };
     }
     if (opts.base && !(await refExists(exec, cwd, opts.base))) {
       return { ok: false, reason: "bad-base", text: `Base ref \`${opts.base}\` does not exist.` };
@@ -409,14 +541,20 @@ export default function (pi: ExtensionAPI) {
 
     let carried = false;
     let carryNote = "clean — nothing to carry";
+    const selective = !!opts.carryPaths?.length;
     if (opts.carry && !facts.clean) {
-      const res = await carryChangesViaStash(exec, cwd, targetPath, `pi-worktree:${branch}`);
+      const res = await carryChangesViaStash(exec, cwd, targetPath, `pi-worktree:${branch}`, undefined, selective ? opts.carryPaths : undefined);
       carried = res.carried;
+      const n = opts.carryPaths?.length ?? 0;
       carryNote = res.carried
-        ? "uncommitted changes carried via stash"
+        ? selective
+          ? `carried ${n} selected file${n === 1 ? "" : "s"} via stash — unrelated changes left in origin`
+          : "uncommitted changes carried via stash"
         : res.conflict
           ? `carry CONFLICT — stash kept (${res.stashRef ?? "refs/stash"}); resolve in ${targetPath}. ${res.output ?? ""}`
-          : `carry skipped: ${res.reason ?? res.output ?? "unknown"}`;
+          : selective && res.reason === "clean"
+            ? "selected files have no changes — nothing carried (other dirty files left in origin)"
+            : `carry skipped: ${res.reason ?? res.output ?? "unknown"}`;
     } else if (!opts.carry) {
       carryNote = "carry disabled — new worktree starts from base only";
     }
@@ -439,7 +577,12 @@ export default function (pi: ExtensionAPI) {
     await saveLink(commonDir, link);
     pi.appendEntry(LINK_ENTRY, link);
     await recordEvent({ kind: "create", ...link });
-    return { ok: true, link, branch, path: targetPath, carried, carryNote };
+    const dirtyBefore = porcelainPaths(facts.porcelain);
+    return {
+      ok: true, link, branch, path: targetPath, carried, carryNote,
+      from: facts.branch, carriedPaths: selective ? (opts.carryPaths ?? []) : carried ? dirtyBefore : [],
+      totalDirty: dirtyBefore.length, selective, clean: facts.clean, bumpedFrom,
+    };
   }
 
   /** Bind the session to a fresh link: name, title, chrome, policy cache. */
@@ -719,6 +862,8 @@ export default function (pi: ExtensionAPI) {
 
     // Checkpoint both sides. The source checkpoint carries the task as its
     // subject so the landed history reads like intent, not timestamps.
+    // Both are recorded: auto-created commits deserve visibility.
+    const checkpoints: CheckpointInfo[] = [];
     if (!srcStatus.clean) {
       const c = await ensureCommitted(exec, sourcePath, message);
       if (!c.committed) {
@@ -727,10 +872,12 @@ export default function (pi: ExtensionAPI) {
           details: { ok: false, reason: "commit-failed", output: c.output },
         };
       }
+      checkpoints.push({ branch: sourceBranch, side: "source", paths: porcelainPaths(srcStatus.porcelain), subject: message });
     }
     let targetCheckpoint: string | null = null;
     if (!tgtStatus.clean) {
-      const c = await ensureCommitted(exec, targetPath, `wip(${targetBranch ?? "origin"}): checkpoint before landing ${sourceBranch}`);
+      const subject = `wip(${targetBranch ?? "origin"}): checkpoint before landing ${sourceBranch}`;
+      const c = await ensureCommitted(exec, targetPath, subject);
       if (!c.committed) {
         return {
           text: `Could not commit pending changes in target ${targetPath}:\n${c.output}\nConfigure git identity or commit manually, then retry.`,
@@ -738,7 +885,18 @@ export default function (pi: ExtensionAPI) {
         };
       }
       targetCheckpoint = c.sha ?? null;
+      checkpoints.push({ branch: targetBranch ?? "origin", side: "target", paths: porcelainPaths(tgtStatus.porcelain), subject });
     }
+
+    // Post-checkpoint truth: what actually lands (subjects/names/counts).
+    const landed = targetBranch
+      ? {
+        ahead: (await aheadBehind(exec, sourcePath, targetBranch, "HEAD")).ahead,
+        stat: await diffStat(exec, sourcePath, targetBranch, "HEAD"),
+        subjects: await commitSubjects(exec, sourcePath, targetBranch, "HEAD"),
+        names: await diffNames(exec, sourcePath, targetBranch, "HEAD"),
+      }
+      : { ahead: 0, stat: { files: 0, insertions: 0, deletions: 0 }, subjects: [] as string[], names: [] as string[] };
 
     const merged = await mergeInto(exec, targetPath, sourceBranch, strategy, message, undefined, sourcePath, targetBranch ?? null);
     if (!merged.ok) {
@@ -766,7 +924,8 @@ export default function (pi: ExtensionAPI) {
     if (link) await saveLink(commonDir, { ...link, status: "landed", landedAt: Date.now(), landStrategy: merged.applied, landSha: sha });
     await recordEvent({ kind: "land", source: sourcePath, target: targetPath, strategy: merged.applied, sha });
     const cleanup = opts.remove ? await cleanupWorktree(exec, commonDir, link, sourcePath, sourceBranch, targetPath) : "";
-    const label = merged.applied === "rebase" ? "rebase → ff" : merged.applied;
+    const label = merged.applied === "rebase" ? "rebase" : merged.applied;
+    const kept = cleanup && !cleanup.startsWith("Cleaned up") ? cleanup.split("\n")[0] : null;
     return {
       text: [
         `Landed \`${sourceBranch}\` into ${targetPath} (${label}, ${shortSha(sha)}).`,
@@ -775,7 +934,12 @@ export default function (pi: ExtensionAPI) {
         merged.output,
         cleanup,
       ].filter(Boolean).join("\n"),
-      details: { ok: true, sha, target: targetPath, source: sourcePath, strategy: label, note: merged.note, cleanup, targetCheckpoint, branch: sourceBranch, dest: targetBranch },
+      details: {
+        ok: true, sha, target: targetPath, source: sourcePath, strategy: label,
+        note: merged.note, cleanup, targetCheckpoint, branch: sourceBranch, dest: targetBranch,
+        ahead: landed.ahead, stat: landed.stat, names: landed.names, subjects: landed.subjects,
+        checkpoints, kept,
+      },
       link: link ?? undefined,
     };
   }
@@ -910,31 +1074,37 @@ export default function (pi: ExtensionAPI) {
       const link = store ? (activeLinkFor(store, canon) ?? findByWorktree(store, canon)) : undefined;
       const kids = store ? childrenOf(store, canon) : [];
       const me = ctx.sessionManager.getSessionId();
+      const dirty = facts.porcelain.split("\n").filter(Boolean).length;
       const text = formatWorktreeList(facts.topLevel, facts.branch, facts.clean, facts.porcelain, facts.worktrees, link, kids, me, binding);
       return {
         content: [{ type: "text", text }],
-        details: { ok: true, topLevel: facts.topLevel, branch: facts.branch, clean: facts.clean, worktrees: facts.worktrees, link: link ?? null, children: kids, bound: binding },
+        details: { ok: true, topLevel: facts.topLevel, branch: facts.branch, clean: facts.clean, dirty, worktrees: facts.worktrees, link: link ?? null, children: kids, bound: binding },
       };
     },
+    renderShell: "self",
+    renderCall: silentRender,
+    renderResult: silentRender,
   });
 
   pi.registerTool({
     name: "worktree_create",
     label: "Worktree Create",
     description:
-      "Create a new git worktree on a new branch, carry uncommitted changes via stash, and bind this session to it (subsequent tool calls run inside it). Use when the workspace is CLEAN and the task is experimental, risky, or parallel.",
+      "Create a new git worktree on a new branch, carry uncommitted changes via stash, and bind this session to it (subsequent tool calls run inside it). Use to isolate experimental, risky, or parallel work — never raw git worktree commands.",
     promptSnippet: "Isolate experimental work with worktree_create",
     promptGuidelines: [
-      "Use worktree_create when the workspace is CLEAN and the task is experimental, risky, or explicitly parallel.",
-      "Pass the task text so the branch name and the eventual land commit describe the work.",
+      "Use worktree_create to isolate experimental, risky, or parallel work — never raw git worktree commands.",
+      "Always pass an explicit `branch`: name it after the work, never a fixed or date-based format.",
+      "When the workspace is dirty, triage first (worktree_status): carry only files related to the task via `carryPaths`; leave unrelated files untouched in the origin.",
       "When work in the new worktree is finished, ask the user before landing instead of calling worktree_land silently.",
     ],
     parameters: Type.Object({
-      task: Type.Optional(Type.String({ description: "One line describing the work. Names the branch (wt-<slug>) and becomes the land commit subject." })),
-      branch: Type.Optional(Type.String({ description: "Explicit branch name. Omit unless the user named one." })),
+      task: Type.Optional(Type.String({ description: "One line describing the work. Becomes the land commit subject." })),
+      branch: Type.Optional(Type.String({ description: "Branch name — always choose a descriptive one yourself; never a fixed or date-based format. Collisions auto-bump (-2, -3), no need to pre-check." })),
       base: Type.Optional(Type.String({ description: "Base ref for the new branch. Defaults to current HEAD." })),
       path: Type.Optional(Type.String({ description: "Worktree path. Defaults to a sibling .worktrees directory." })),
-      carry: Type.Optional(Type.Boolean({ description: "Carry uncommitted changes via stash. Default true." })),
+      carry: Type.Optional(Type.Boolean({ description: "Carry uncommitted changes via stash. Default true; pass false to start clean." })),
+      carryPaths: Type.Optional(Type.Array(Type.String(), { description: "Carry only these paths (relative to the repo root); omit to carry all uncommitted changes. Use after triaging dirty files." })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const cwd = ctx.cwd;
@@ -944,6 +1114,8 @@ export default function (pi: ExtensionAPI) {
         base: params.base,
         path: params.path,
         carry: params.carry !== false,
+        carryPaths: params.carryPaths,
+        autoBump: true,
         task: (params.task ?? "").trim(),
         sessionId: ctx.sessionManager.getSessionId(),
       });
@@ -953,10 +1125,44 @@ export default function (pi: ExtensionAPI) {
       await bindSession(ctx, r.link);
       const text = [
         `Worktree ready: \`${r.branch}\` at ${r.path} — ${r.carryNote}.`,
+        r.bumpedFrom ? `Branch \`${r.bumpedFrom}\` already existed; using \`${r.branch}\`.` : "",
         `This session is now bound to it: relative paths and bash run inside the worktree automatically; edits under the origin checkout are blocked.`,
         `Finish with worktree_land after the user confirms, or worktree_abandon to discard.`,
-      ].join("\n");
-      return { content: [{ type: "text", text }], details: { ok: true, branch: r.branch, path: r.path, carried: r.carried, carryNote: r.carryNote, link: r.link } };
+      ].filter(Boolean).join("\n");
+      return {
+        content: [{ type: "text", text }],
+        details: {
+          ok: true, from: r.from, branch: r.branch, carried: r.carriedPaths,
+          total: r.totalDirty, selective: r.selective, clean: r.clean,
+        },
+      };
+    },
+    renderShell: "self",
+    renderCall: silentRender,
+    renderResult(result, { expanded, isPartial }, theme) {
+      const ink = {
+        hero: (s: string) => theme.fg("accent", theme.bold(s)),
+        dim: (s: string) => theme.fg("dim", s),
+        error: (s: string) => theme.fg("error", s),
+      };
+      const box = (text: string) => {
+        const b = new Box(1, 1, (t: string) => theme.bg("toolPendingBg", t));
+        b.addChild(new Text(text, 0, 0));
+        return b;
+      };
+      if (isPartial) return box(ink.dim("…"));
+      const full = (result as { content?: Array<{ text?: unknown }> }).content?.map((b) => (typeof b?.text === "string" ? b.text : "")).filter(Boolean).join("\n") ?? "";
+      if (expanded) return box(full);
+      const d = (result as { details?: { ok?: unknown; from?: unknown; branch?: unknown; carried?: unknown; total?: unknown; selective?: unknown; clean?: unknown } }).details ?? {};
+      if (d.ok !== true) return box(ink.error(`❌ ${firstLine(full)}`));
+      return box(worktreeText({
+        from: typeof d.from === "string" ? d.from : "?",
+        branch: typeof d.branch === "string" ? d.branch : "?",
+        carried: Array.isArray(d.carried) ? d.carried.map(String) : [],
+        total: typeof d.total === "number" ? d.total : 0,
+        selective: d.selective === true,
+        clean: d.clean === true,
+      }, ink));
     },
   });
 
@@ -968,10 +1174,11 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Land a linked worktree back into its origin",
     promptGuidelines: [
       "Use worktree_land to finish work inside a linked worktree instead of raw git merge commands.",
+      "On conflict, report to the user and wait for direction — never call finish:true on a conflicted merge without explicit user consent.",
     ],
     parameters: Type.Object({
       target: Type.Optional(Type.String({ description: "Origin worktree path or branch. Auto-detected from linkage when omitted." })),
-      strategy: Type.Optional(StringEnum(["rebase", "merge", "squash"] as const, { description: "rebase (default: rebase then fast-forward, linear history), merge (merge commit), squash (one commit)" })),
+      strategy: Type.Optional(StringEnum(["rebase", "merge", "squash"] as const, { description: "Merge strategy. Omit to use the remembered /land preference (rebase until the user has chosen)." })),
       message: Type.Optional(Type.String({ description: "Commit subject for pending changes / squash. Defaults to the worktree's task." })),
       remove: Type.Optional(Type.Boolean({ description: "Remove the source worktree after a successful land. Default true." })),
       finish: Type.Optional(Type.Boolean({ description: "Conclude an in-progress conflicted merge after resolving files." })),
@@ -980,9 +1187,10 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, ctx) {
       const cwd = ctx.cwd;
       const exec = getExec(cwd, signal ?? undefined);
+      const remembered = (await loadPrefs()).defaultStrategy;
       const result = await landFlow(exec, cwd, {
         to: params.target,
-        strategy: params.strategy ?? DEFAULT_STRATEGY,
+        strategy: params.strategy ?? (validStrategy(remembered) ? remembered : DEFAULT_STRATEGY),
         message: params.message,
         remove: params.remove !== false,
         finish: params.finish ?? false,
@@ -991,6 +1199,40 @@ export default function (pi: ExtensionAPI) {
       });
       if (result.details.ok) await unbindSession(ctx, result.link);
       return { content: [{ type: "text", text: result.text }], details: result.details };
+    },
+    renderShell: "self",
+    renderCall: silentRender,
+    renderResult(result, { expanded, isPartial }, theme) {
+      const ink = {
+        hero: (s: string) => theme.fg("accent", theme.bold(s)),
+        dim: (s: string) => theme.fg("dim", s),
+        error: (s: string) => theme.fg("error", s),
+      };
+      const box = (text: string) => {
+        const b = new Box(1, 1, (t: string) => theme.bg("toolPendingBg", t));
+        b.addChild(new Text(text, 0, 0));
+        return b;
+      };
+      if (isPartial) return box(ink.dim("…"));
+      const full = (result as { content?: Array<{ text?: unknown }> }).content?.map((b) => (typeof b?.text === "string" ? b.text : "")).filter(Boolean).join("\n") ?? "";
+      if (expanded) return box(full);
+      const d = (result as { details?: Record<string, unknown> }).details ?? {};
+      return box(landText({
+        ok: d.ok === true,
+        branch: typeof d.branch === "string" ? d.branch : "?",
+        dest: typeof d.dest === "string" ? d.dest : "?",
+        strategy: typeof d.strategy === "string" ? d.strategy : DEFAULT_STRATEGY,
+        sha: typeof d.sha === "string" ? d.sha : null,
+        ahead: typeof d.ahead === "number" ? d.ahead : undefined,
+        stat: (d.stat ?? undefined) as DiffStat | undefined,
+        names: Array.isArray(d.names) ? d.names.map(String) : undefined,
+        subjects: Array.isArray(d.subjects) ? d.subjects.map(String) : undefined,
+        checkpoints: Array.isArray(d.checkpoints) ? d.checkpoints as CheckpointInfo[] : undefined,
+        kept: typeof d.kept === "string" ? d.kept : undefined,
+        finished: d.finished === true ? true : undefined,
+        conflicted: Array.isArray(d.conflicted) ? d.conflicted.map(String) : undefined,
+        reason: typeof d.reason === "string" ? d.reason : undefined,
+      }, ink, full));
     },
   });
 
@@ -1010,12 +1252,39 @@ export default function (pi: ExtensionAPI) {
       if (result.details.ok) await unbindSession(ctx, result.link);
       return { content: [{ type: "text", text: result.text }], details: result.details };
     },
+    renderShell: "self",
+    renderCall: silentRender,
+    renderResult(result, { expanded, isPartial }, theme) {
+      const ink = {
+        hero: (s: string) => theme.fg("accent", theme.bold(s)),
+        dim: (s: string) => theme.fg("dim", s),
+        error: (s: string) => theme.fg("error", s),
+      };
+      const box = (text: string) => {
+        const b = new Box(1, 1, (t: string) => theme.bg("toolPendingBg", t));
+        b.addChild(new Text(text, 0, 0));
+        return b;
+      };
+      if (isPartial) return box(ink.dim("…"));
+      const full = (result as { content?: Array<{ text?: unknown }> }).content?.map((b) => (typeof b?.text === "string" ? b.text : "")).filter(Boolean).join("\n") ?? "";
+      if (expanded) return box(full);
+      const d = (result as { details?: { ok?: unknown; branch?: unknown; commits?: unknown; dirty?: unknown; reason?: unknown } }).details ?? {};
+      if (d.ok !== true) {
+        const head = firstLine(full);
+        return box(d.reason === "needs-confirm" ? head : ink.error(`❌ ${head}`));
+      }
+      return box(abandonText({
+        branch: typeof d.branch === "string" ? d.branch : "?",
+        commits: typeof d.commits === "number" ? d.commits : 0,
+        dirty: typeof d.dirty === "number" ? d.dirty : 0,
+      }, ink));
+    },
   });
 
   // ---------------------------------------------------------------- commands
 
   pi.registerCommand("worktree", {
-    description: "Isolate work in a fresh linked worktree — the agent continues the task there",
+    description: "Isolate work in a fresh linked worktree — the agent names it, carries related changes, and continues there",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const cwd = ctx.cwd;
       const exec = getExec(cwd, ctx.signal ?? undefined);
@@ -1023,7 +1292,7 @@ export default function (pi: ExtensionAPI) {
 
       if (parsed.help) {
         emit(ctx, [
-          "/worktree [task...] [--branch <name>] [--base <ref>] — isolate work in a fresh worktree; the agent continues there.",
+          "/worktree [task...] [--branch <name>] [--base <ref>] [--path <path>] [--no-carry] — isolate work in a fresh worktree. The agent names it, carries only related changes, and continues there. No questions asked.",
           "/land — preview and merge the worktree back when done.",
           "Status, abandon and conflicts are the agent's job — just describe what you want.",
         ].join("\n"), "info");
@@ -1040,175 +1309,212 @@ export default function (pi: ExtensionAPI) {
         emit(ctx, "Not a git repository.", "error");
         return;
       }
-      // Dirty workspaces carry via stash — confirm once. Clean takes the fast path.
-      if (ctx.hasUI && !parsed.json && !parsed.yes && !facts.clean) {
-        const n = facts.porcelain.split("\n").filter(Boolean).length;
-        const ok = await ctx.ui.confirm(
-          "Carry uncommitted changes?",
-          `${n} file${n === 1 ? "" : "s"} with uncommitted changes will move into the new worktree (via stash; the origin becomes clean).${parsed.task ? `\nTask: ${parsed.task}` : ""}`,
-        );
-        if (!ok) {
-          emit(ctx, "Cancelled.", "info");
+      const hasHistory = ctx.sessionManager.getEntries().some((e) => e.type === "message");
+
+      // Two cases create directly with zero dialogs. Everything else is
+      // model-driven (below): the model triages dirty files and names the
+      // branch itself — the command never asks and never forces a format.
+      //   - fast path: the user named the branch AND there is nothing to
+      //     triage (clean workspace, or carry disabled).
+      //   - empty edge: no task and no conversation — nothing to infer a
+      //     task or a name from, so create and wait instead of an awkward turn.
+      if ((parsed.branch && (facts.clean || !parsed.carry)) || (!parsed.task && !hasHistory)) {
+        const r = await createFlow(exec, cwd, {
+          branch: parsed.branch,
+          base: parsed.base,
+          path: parsed.path,
+          carry: parsed.carry,
+          task: parsed.task,
+          sessionId: ctx.sessionManager.getSessionId(),
+        });
+        if (!r.ok) {
+          emit(ctx, r.text, "error");
           return;
         }
-      }
+        await bindSession(ctx, r.link);
 
-      const r = await createFlow(exec, cwd, {
-        branch: parsed.branch,
-        base: parsed.base,
-        path: parsed.path,
-        carry: parsed.carry,
-        task: parsed.task,
-        sessionId: ctx.sessionManager.getSessionId(),
-      });
-      if (!r.ok) {
-        emit(ctx, r.text, "error");
+        const handoff = parsed.task
+          ? `User ran /worktree for: "${parsed.task}". This session is now bound to the worktree at ${r.path} — relative paths and bash already run there. Do the task; when done, ask the user before landing (never land silently).`
+          : `User ran /worktree with no task text. This session is now bound to the worktree at ${r.path}. Infer the pending task from the conversation and do it there; when done, ask the user before landing (never land silently).`;
+        const summary = [`Worktree ready: \`${r.branch}\` at ${r.path} — ${r.carryNote}.`, handoff].join("\n");
+        if (!ctx.hasUI) emit(ctx, summary, "info");
+        const trigger = Boolean(parsed.task) || hasHistory;
+        pi.sendMessage(
+          {
+            customType: CARD_TYPE,
+            content: trigger ? summary : `Worktree ready: \`${r.branch}\` at ${r.path} — ${r.carryNote}. Session bound; waiting for the user's task.`,
+            display: true,
+            details: {
+              kind: "create", from: r.from ?? facts.branch ?? "?", branch: r.branch,
+              carried: r.carriedPaths, total: r.totalDirty, selective: r.selective, clean: r.clean,
+            } satisfies CardDetails,
+          },
+          { triggerTurn: trigger },
+        );
+        if (!trigger && ctx.hasUI) ctx.ui.notify(`🌲 ${r.branch} ready — tell me what to do there.`, "info");
         return;
       }
-      await bindSession(ctx, r.link);
 
-      // Handoff. With no task and no conversation yet there is nothing to
-      // infer — just report and wait for the user instead of an awkward turn.
-      const hasHistory = ctx.sessionManager.getEntries().some((e) => e.type === "message");
-      const handoff = parsed.task
-        ? `User ran /worktree for: "${parsed.task}". This session is now bound to the worktree at ${r.path} — relative paths and bash already run there. Do the task; when done, ask the user before landing (never land silently).`
-        : `User ran /worktree with no task text. This session is now bound to the worktree at ${r.path}. Infer the pending task from the conversation and do it there; when done, ask the user before landing (never land silently).`;
-      const summary = [`Worktree ready: \`${r.branch}\` at ${r.path} — ${r.carryNote}.`, handoff].join("\n");
-      if (!ctx.hasUI) emit(ctx, summary, "info");
-      const trigger = Boolean(parsed.task) || hasHistory;
+      // Model-driven isolation. The handoff stays invisible (display:false):
+      // the transcript shows a single purple WORKTREE block once the model
+      // creates it. Cards signal; the model speaks.
+      const dirty = facts.porcelain.split("\n").filter(Boolean);
+      const lines = [
+        parsed.task
+          ? `User ran /worktree for: "${parsed.task}".`
+          : "User ran /worktree with no task text — infer the pending task from the conversation first.",
+        `Origin: ${facts.branch ?? "?"} @ ${facts.topLevel}.`,
+        "Isolate the work into a new linked worktree YOURSELF by calling worktree_create — never ask the user anything, never use raw git worktree commands.",
+        "1. The dirty files are listed below — triage from this list. Call worktree_status only if you need more (current branch, existing worktrees).",
+        parsed.carry
+          ? "2. Triage uncommitted changes: carry only files related to this task via `carryPaths`; leave unrelated files untouched in the origin. If everything dirty belongs here, omit `carryPaths` to carry all. If you carry selectively, tell the user in one line which files you left behind and why."
+          : "2. The user passed --no-carry: create without carrying any uncommitted changes.",
+        parsed.branch
+          ? `3. Use branch \`${sanitizeBranchName(parsed.branch) || parsed.branch}\`.`
+          : "3. Name the branch yourself via `branch` — a descriptive name for this work, never a fixed or date-based format.",
+      ];
+      if (parsed.base) lines.push(`Base the branch on \`${parsed.base}\`.`);
+      if (parsed.path) lines.push(`Create the worktree at \`${parsed.path}\`.`);
+      if (dirty.length > 0) {
+        lines.push(`Dirty files right now (${dirty.length}):`);
+        for (const f of dirty.slice(0, 30)) lines.push(`  ${f}`);
+        if (dirty.length > 30) lines.push(`  … ${dirty.length - 30} more`);
+      }
+      lines.push("Then continue the task inside the new worktree (tool calls are re-rooted there automatically). When done, ask the user before landing (never land silently).");
+      const instruction = lines.join("\n");
+      if (!ctx.hasUI) emit(ctx, instruction, "info");
       pi.sendMessage(
         {
           customType: CARD_TYPE,
-          content: trigger ? summary : `Worktree ready: \`${r.branch}\` at ${r.path} — ${r.carryNote}. Session bound; waiting for the user's task.`,
-          display: true,
-          details: { kind: "create", branch: r.branch, rel: await displayPath(r.path, cwd), task: parsed.task, carried: r.carried } satisfies CardDetails,
+          content: instruction,
+          display: false,
+          details: undefined,
         },
-        { triggerTurn: trigger },
+        { triggerTurn: true },
       );
-      if (!trigger && ctx.hasUI) ctx.ui.notify(`🌲 ${r.branch} ready — tell me what to do there.`, "info");
     },
   });
 
   pi.registerCommand("land", {
-    description: "Preview and merge the linked worktree back into its origin (rebase→ff by default)",
-    handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      void _args;
+    description: "Land the bound worktree straight into its origin (strategy remembered; override: /land --strategy squash)",
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
       const cwd = ctx.cwd;
       const exec = getExec(cwd, ctx.signal ?? undefined);
       const me = ctx.sessionManager.getSessionId();
       const ui = ctx.hasUI;
+      const parsed = parseLandArgs(args);
 
+      if (parsed.help) {
+        emit(ctx, [
+          "/land [target] [--strategy rebase|merge|squash] — land straight, no questions.",
+          "The merge strategy is asked once, remembered across repos, and shown on every land line.",
+          "An explicit --strategy wins for this run and becomes the new default.",
+        ].join("\n"), "info");
+        return;
+      }
+      if (parsed.badStrategy !== undefined) {
+        emit(ctx, `Unknown strategy \`${parsed.badStrategy}\` — want rebase, merge, or squash.`, "error");
+        return;
+      }
+
+      // Zero popups by design: no strategy picker, no child picker, no
+      // foreign-owner confirm. Blocks and ambiguity surface as purple cards.
       const result = await landFlow(exec, cwd, {
+        to: parsed.target,
         strategy: DEFAULT_STRATEGY,
         remove: true,
         finish: false,
         abort: false,
         sessionId: me,
-        confirmForeign: ui
-          ? async (foreign) => {
-            const who = foreign.map((l) => `\`${l.branch}\` ${ownerLabel(l, me)}`).join(", ");
-            return ctx.ui.confirm("Land another session's worktree?", `${who} is owned by a different session. Land it anyway?`);
+        review: async (p) => {
+          if (parsed.strategy) {
+            await savePrefs({ defaultStrategy: parsed.strategy });
+            return { strategy: parsed.strategy, message: p.message };
           }
-          : undefined,
-        pickChild: ui
-          ? async (kids) => {
-            const labels = kids.map((k) => `${k.branch}${k.task ? ` — ${truncateMiddle(k.task, 40)}` : ""}${ownerLabel(k, me) ? ` ${ownerLabel(k, me)}` : ""}`);
-            const pick = await ctx.ui.select("Which worktree to land?", labels);
-            const idx = pick ? labels.indexOf(pick) : -1;
-            return idx >= 0 ? kids[idx] : undefined;
+          const saved = (await loadPrefs()).defaultStrategy;
+          if (validStrategy(saved)) return { strategy: saved, message: p.message };
+          if (ui) {
+            const pick = await ctx.ui.select("How should /land merge from now on?", [
+              "Rebase — linear, fast-forward",
+              "Squash — one commit",
+              "Merge — keep history",
+            ]);
+            if (!pick) return undefined;
+            const strategy: Strategy = pick.startsWith("Squash") ? "squash" : pick.startsWith("Merge") ? "merge" : "rebase";
+            await savePrefs({ defaultStrategy: strategy });
+            return { strategy, message: p.message };
           }
-          : undefined,
-        review: ui
-          ? async (p) => {
-            const dest = p.targetBranch ?? "origin";
-            const facts = [
-              `${p.ahead} commit${p.ahead === 1 ? "" : "s"}`,
-              p.dirtySource ? `${p.dirtySource} uncommitted` : "",
-              fmtStat(p.stat),
-              p.behind ? `${dest} moved on by ${p.behind}` : "",
-              p.dirtyTarget ? `${dest} has ${p.dirtyTarget} dirty (will checkpoint)` : "",
-            ].filter(Boolean).join(" · ");
-            const REBASE = `Land — rebase onto ${dest}, fast-forward (linear)`;
-            const SQUASH = `Squash — one commit: "${truncateMiddle(p.message, 48)}"`;
-            const MERGE = `Merge — keep history, add a merge commit`;
-            const EDIT = "Edit the commit subject first…";
-            const CANCEL = "Cancel";
-            let message = p.message;
-            for (;;) {
-              const pick = await ctx.ui.select(`🌲 ${p.sourceBranch} → ${dest} · ${facts}`, [REBASE, SQUASH, MERGE, EDIT, CANCEL]);
-              if (!pick || pick === CANCEL) return undefined;
-              if (pick === EDIT) {
-                const edited = await ctx.ui.input("Commit subject", message);
-                if (edited && edited.trim()) message = edited.trim();
-                continue;
-              }
-              const strategy: Strategy = pick === SQUASH ? "squash" : pick === MERGE ? "merge" : "rebase";
-              return { strategy, message };
-            }
-          }
-          : undefined,
+          return { strategy: DEFAULT_STRATEGY, message: p.message };
+        },
       });
 
       const rd = result.details as {
-        ok?: boolean; reason?: string; sha?: string | null; strategy?: string; note?: string;
-        cleanup?: string; branch?: string | null; dest?: string; source?: string; target?: string;
-        targetCheckpoint?: string | null; conflicted?: string[];
+        ok?: boolean; reason?: string; sha?: string | null; strategy?: string;
+        branch?: string | null; dest?: string; source?: string; target?: string;
+        ahead?: number; stat?: DiffStat; names?: string[]; subjects?: string[];
+        checkpoints?: CheckpointInfo[]; kept?: string | null; finished?: boolean;
+        conflicted?: string[];
       };
       if (rd.reason === "cancelled") {
-        emit(ctx, "Cancelled.", "info");
+        emit(ctx, "Cancelled — pick a strategy next time and it sticks.", "info");
         return;
       }
       if (rd.ok) await unbindSession(ctx, result.link);
+      if (!ui) emit(ctx, result.text, rd.ok ? "info" : "error");
 
-      // Conflict: offer the agent or an abort right here instead of leaving a
-      // half-merged target for the user to discover.
-      let text = result.text;
-      if (!rd.ok && rd.reason === "conflict" && ui && rd.target) {
-        const AGENT = "Let the agent resolve the conflicts";
-        const ABORT = "Abort — roll the merge back";
-        const MANUAL = "I'll resolve them myself";
-        const pick = await ctx.ui.select(`⚠ ${rd.conflicted?.length ?? 0} conflicted file${(rd.conflicted?.length ?? 0) === 1 ? "" : "s"} in ${rd.dest ?? "target"}`, [AGENT, ABORT, MANUAL]);
-        if (pick === ABORT) {
-          const r = await abortMerge(exec, rd.target);
-          await recordEvent({ kind: "land-abort", dir: rd.target });
-          emit(ctx, r.code === 0 ? "Merge aborted — both worktrees are back where they were." : `Abort failed:\n${r.stderr}`, r.code === 0 ? "info" : "error");
-          await refreshChrome(ctx, cwd);
-          return;
-        }
-        if (pick === MANUAL) {
-          emit(ctx, `Resolve the files in ${rd.target}, \`git add\` them, then run /land again to conclude.`, "info");
-          return;
-        }
-        text = `${result.text}\nThe user asked you to resolve these conflicts now: edit the files in ${rd.target}, \`git add\` them, then call worktree_land finish:true.`;
+      // Conflict is the one full stop: purple card, then the model speaks —
+      // explains in its own words, asks how to proceed, and never resolves
+      // or finishes without explicit user consent.
+      if (!rd.ok && rd.reason === "conflict") {
+        const branch = rd.branch ?? "?";
+        const dest = rd.dest ?? "?";
+        pi.sendMessage(
+          {
+            customType: CARD_TYPE,
+            content: [
+              result.text,
+              `Explain to the user in your own words what clashed and ask how to proceed (options: you resolve it now / they resolve it themselves and run /land again / abort the merge). Do NOT edit anything, resolve anything, or call worktree_land finish:true without explicit user consent.`,
+            ].join("\n"),
+            display: true,
+            details: {
+              kind: "land", ok: false, branch, dest,
+              strategy: rd.strategy ?? DEFAULT_STRATEGY, sha: null,
+              conflicted: rd.conflicted, reason: "conflict",
+            } satisfies CardDetails,
+          },
+          { triggerTurn: true },
+        );
+        await refreshChrome(ctx, cwd);
+        return;
       }
 
-      if (!ui) emit(ctx, result.text, rd.ok ? "info" : "error");
-      const { basename } = await import("node:path");
-      const cleanup = typeof rd.cleanup === "string" ? rd.cleanup : "";
-      const note = [
-        rd.note ? "fell back to merge" : "",
-        rd.targetCheckpoint ? `checkpoint ${shortSha(rd.targetCheckpoint)}` : "",
-        cleanup.startsWith("Cleaned up") ? "cleaned up" : cleanup.startsWith("Cleanup skipped") ? "kept" : "",
-      ].filter(Boolean).join(" · ");
-      pi.sendMessage(
-        {
-          customType: CARD_TYPE,
-          content: text,
-          display: true,
-          details: {
-            kind: "land",
-            ok: rd.ok === true,
-            branch: rd.branch ?? (rd.source ? basename(rd.source) : "?"),
-            dest: rd.dest ?? (rd.target ? basename(rd.target) : "?"),
-            strategy: rd.strategy ?? DEFAULT_STRATEGY,
-            sha: rd.sha ?? null,
-            note,
-            conflicted: rd.conflicted,
-            reason: rd.reason,
-          } satisfies CardDetails,
-        },
-        { triggerTurn: true },
-      );
+      if (rd.ok) {
+        pi.sendMessage(
+          {
+            customType: CARD_TYPE,
+            content: result.text,
+            display: true,
+            details: {
+              kind: "land", ok: true,
+              branch: rd.branch ?? "?", dest: rd.dest ?? "?",
+              strategy: rd.strategy ?? DEFAULT_STRATEGY, sha: rd.sha ?? null,
+              ahead: rd.ahead, stat: rd.stat, names: rd.names, subjects: rd.subjects,
+              checkpoints: rd.checkpoints, kept: rd.kept ?? null, finished: rd.finished,
+            } satisfies CardDetails,
+          },
+          { triggerTurn: true },
+        );
+      } else {
+        pi.sendMessage(
+          {
+            customType: CARD_TYPE,
+            content: result.text,
+            display: true,
+            details: { kind: "error" } satisfies CardDetails,
+          },
+          { triggerTurn: false },
+        );
+      }
       await refreshChrome(ctx, cwd);
     },
   });

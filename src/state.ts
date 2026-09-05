@@ -228,6 +228,48 @@ export function ownerLabel(link: WorktreeLink, me: string | null | undefined): s
   return `(session ${link.sessionId.slice(0, 8)})`;
 }
 
+/**
+ * Global preferences shared across repos — e.g. the /land strategy the user
+ * picked the one time they were asked. Lives under the pi data dir (outside
+ * any repo) so it applies everywhere. Missing/corrupt file = no preferences.
+ * All IO is best-effort: failures resolve to `{}` / no-op, never throw.
+ */
+export interface GlobalPrefs {
+  defaultStrategy?: string;
+}
+
+export const STRATEGIES = ["rebase", "merge", "squash"] as const;
+
+export function prefsPath(homeDir?: string): string {
+  const home = homeDir ?? process.env.HOME ?? process.env.USERPROFILE ?? "~";
+  return `${normalizePath(home)}/.pi/agent/pi-worktree/config.json`;
+}
+
+export function validStrategy(s: unknown): s is (typeof STRATEGIES)[number] {
+  return typeof s === "string" && (STRATEGIES as readonly string[]).includes(s);
+}
+
+export async function loadPrefs(homeDir?: string): Promise<GlobalPrefs> {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const parsed = JSON.parse(await readFile(prefsPath(homeDir), "utf8")) as GlobalPrefs;
+    if (parsed && typeof parsed === "object" && (parsed.defaultStrategy === undefined || validStrategy(parsed.defaultStrategy))) {
+      return parsed.defaultStrategy === undefined ? {} : { defaultStrategy: parsed.defaultStrategy };
+    }
+  } catch {
+    // Missing/corrupt = no preferences.
+  }
+  return {};
+}
+
+export async function savePrefs(prefs: GlobalPrefs, homeDir?: string): Promise<void> {
+  try {
+    await writeJsonAtomic(prefsPath(homeDir), prefs);
+  } catch {
+    // Preference persistence is advisory; the run continues with the choice.
+  }
+}
+
 /** Widget/status visibility: own links plus unowned legacy links (claimable by
  *  anyone). Foreign-owned links stay out of the glanceable chrome — they still
  *  appear in worktree_status and the model policy, so parallel work is not
