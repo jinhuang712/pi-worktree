@@ -125,7 +125,7 @@ What you see: exactly one purple card per action, details aligned under a `【he
 /worktree --no-carry spike a risky refactor
 ```
 
-After creation the session is **bound** to the worktree: the session name, terminal title and widget show `🌲 <branch>`, and the agent's tool calls run inside it (see below). The agent continues the task there and asks whether to land when done. With no task text and no conversation yet, the worktree is created and Pi waits for you instead of guessing. One session owns at most one active worktree per repo — creating again points back at the owned link until it is landed or abandoned.
+After creation the session is **bound** to the worktree: the session name, terminal title and widget show `🌲 <branch>`, and the agent's tool calls run inside it (see below). The agent continues the task there and asks whether to land when done. With no task text and no conversation yet, the worktree is created and Pi waits for you instead of guessing. With conversation history but no task text, the agent infers the task from the conversation and dirty files — or asks you in one short question when the workspace is clean and nothing is inferable, instead of stalling or inventing a placeholder branch. One session owns at most one active worktree per repo — creating again points back at the owned link until it is landed or abandoned.
 
 ## Session binding — the virtual cwd
 
