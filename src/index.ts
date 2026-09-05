@@ -335,7 +335,7 @@ export default function (pi: ExtensionAPI) {
 
   // Transcript visual language: every pi-worktree block is purple
   // (toolPendingBg). A caps LABEL plus the hero in 【】 lead; detail lines
-  // align under the hero with dim `|--`/`--` trees for item lists (conflict files
+  // align under the hero with dim `|--` trees for item lists (conflict files
   // stay bright — they need action). Emoji mark the
   // family: 🌲 worktree ops, ⚠️ conflicts, 🗑️ abandon, ❌ errors.
   // Cards signal state changes with the smallest effective payload —
@@ -436,15 +436,16 @@ export default function (pi: ExtensionAPI) {
     const meta = [d.strategy, d.sha ? shortSha(d.sha) : ""].filter(Boolean).join(" · ");
     const lines = [`🌲 LAND ${hero}${meta ? ` ${ink.dim(`· ${meta}`)}` : ""}`];
     if (d.finished) lines.push(`${pad}${ink.dim("merge concluded")}`);
-    // One summary line instead of two: `landing 2 commits · 4 files`.
-    // Trees are dim footnotes — the hero already carries the signal.
-    const summary: string[] = [];
-    if (d.ahead !== undefined && d.stat) summary.push(`landing ${count("commit", d.ahead)} · ${count("file", d.stat.files)}`);
-    else if (d.ahead !== undefined) summary.push(`landing ${count("commit", d.ahead)}`);
-    else if (d.stat) summary.push(`landing ${count("file", d.stat.files)}`);
-    if (summary.length) lines.push(`${pad}${ink.dim(summary.join(" · "))}`);
-    lines.push(...treeLines(d.subjects ?? [], TREE_MAX_COMMITS, pad, ink.dim));
-    lines.push(...treeLines(d.names ?? [], TREE_MAX_FILES, pad, ink.dim));
+    // Keep commits and files as separate sections so the two lists cannot be
+    // mistaken for one another. Trees are dim footnotes under their labels.
+    if (d.ahead !== undefined) {
+      lines.push(`${pad}${ink.dim(`landing ${count("commit", d.ahead)}`)}`);
+      lines.push(...treeLines(d.subjects ?? [], TREE_MAX_COMMITS, pad, ink.dim));
+    }
+    if (d.stat) {
+      lines.push(`${pad}${ink.dim(`landing ${count("file", d.stat.files)}`)}`);
+      lines.push(...treeLines(d.names ?? [], TREE_MAX_FILES, pad, ink.dim));
+    }
     // Checkpoints fold into trailing dim notes — no second hero header, no
     // file tree. The file list already appears in the landed names below,
     // but the checkpoint subject (the auto-commit message) is kept.

@@ -9,6 +9,7 @@ All notable changes to `pi-worktree` are documented here.
 - **One session, one tree.** A bare land/abandon resolves only the calling session's own link (or the worktree you're standing in) and never auto-grabs another session's worktree — the `Blocked: … belongs to another session` error is replaced by a `no-own-link` note that lists the others and leaves them alone. Naming a link explicitly still takes it over deliberately, flagged `foreign` with the previous owner named, and the model reports it in chat.
 - **No-task `/worktree` can't stall.** With no task text and a clean workspace where nothing is inferable from the conversation, the model asks the user in one short question what to work on (explicit exception to 'never ask') instead of stalling or inventing a placeholder branch.
 - **Conflicts are the model's job.** `LAND CONFLICT` still names the files in one purple card, but instead of stopping for hand resolution the model reads each file, keeps the intended result from both sides, `git add`s and finishes — explaining what it kept. It only asks the user when both sides look deliberately contradictory.
+- **LAND cards separate commits from files.** The commit count and subjects now have their own section, followed by a distinct file count and path list, so the landed history is easy to scan.
 
 ### Fixed
 
