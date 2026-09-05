@@ -334,6 +334,7 @@ export interface CarryResult {
   reason?: string;
   conflict?: boolean;
   output?: string;
+  selective?: boolean;
 }
 
 /**
@@ -347,11 +348,16 @@ export async function carryChangesViaStash(
   newCwd: string,
   label: string,
   signal?: AbortSignal,
+  /** Restrict the carry to these pathspecs (relative to the origin). Omit to carry everything. */
+  paths?: string[],
 ): Promise<CarryResult> {
   const before = await run(exec, ["rev-parse", "-q", "--verify", "refs/stash"], originCwd, signal);
   const beforeSha = before.code === 0 ? before.stdout.trim() : "";
+  const selective = !!paths?.length;
+  const pushArgs = ["stash", "push", "-u", "-m", label];
+  if (selective) pushArgs.push("--", ...paths!);
 
-  const push = await run(exec, ["stash", "push", "-u", "-m", label], originCwd, signal);
+  const push = await run(exec, pushArgs, originCwd, signal);
   const pushOut = `${push.stdout}\n${push.stderr}`.trim();
   if (/No local changes to save/i.test(pushOut)) {
     return { carried: false, reason: "clean" };
@@ -373,9 +379,15 @@ export async function carryChangesViaStash(
   if (apply.code !== 0) {
     return { carried: false, stashRef, conflict: true, output: applyOut.slice(0, 2000) };
   }
-  await run(exec, ["stash", "drop", "-q", stashRef], newCwd, signal);
+  // `git stash drop` only accepts stash-like refs (stash@{n}), never a raw
+  // sha — locate our entry by sha first, otherwise every carry would leak one.
+  const list = await run(exec, ["stash", "list", "--format=%H"], newCwd, signal);
+  const idx = list.code === 0 ? list.stdout.split("\n").map((s) => s.trim()).indexOf(stashSha) : -1;
+  if (idx >= 0) {
+    await run(exec, ["stash", "drop", "-q", `stash@{${idx}}`], newCwd, signal);
+  }
   void beforeSha;
-  return { carried: true, stashRef, output: applyOut.slice(0, 1000) };
+  return { carried: true, stashRef, output: applyOut.slice(0, 1000), selective };
 }
 
 export interface CreateWorktreeOptions {
@@ -499,6 +511,20 @@ export function parseShortstat(text: string): DiffStat {
 export async function diffStat(exec: ExecFn, cwd: string, base: string, head: string): Promise<DiffStat> {
   const r = await run(exec, ["diff", "--shortstat", `${base}...${head}`], cwd);
   return parseShortstat(r.code === 0 ? r.stdout : "");
+}
+
+/** File paths mentioned in status porcelain (`XY <path>`), renames resolved. */
+export function porcelainPaths(porcelain: string): string[] {
+  return porcelain.split("\n").filter(Boolean)
+    .map((l) => (l.length > 3 ? (l.slice(3).split(" -> ").pop() ?? "") : "").trim())
+    .filter(Boolean);
+}
+
+/** Paths changed in `head` vs `base` (same range as diffStat). */
+export async function diffNames(exec: ExecFn, cwd: string, base: string, head: string): Promise<string[]> {
+  const r = await run(exec, ["diff", "--name-only", `${base}...${head}`], cwd);
+  if (r.code !== 0) return [];
+  return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
 }
 
 /** Subject lines of commits in `head` not in `base`, newest first. */

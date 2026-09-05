@@ -10,11 +10,14 @@ import {
   findByWorktree,
   foreignOwnerOf,
   isInside,
+  loadPrefs,
   loadStore,
   markLanded,
   orderKidsForDisplay,
   ownerLabel,
+  prefsPath,
   saveLink,
+  savePrefs,
   saveStore,
   STORE_DIR,
   storePath,
@@ -154,4 +157,18 @@ test("isInside handles root, children and lookalike siblings", () => {
   assert.equal(isInside("/repo/src/a.ts", "/repo"), true);
   assert.equal(isInside("/repo.worktrees/wt-x/a.ts", "/repo"), false);
   assert.equal(isInside("/other", "/repo"), false);
+});
+
+test("global prefs roundtrip in an isolated home", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-wt-prefs-"));
+  assert.deepEqual(await loadPrefs(home), {});
+  await savePrefs({ defaultStrategy: "squash" }, home);
+  assert.deepEqual(await loadPrefs(home), { defaultStrategy: "squash" });
+  // Corrupt file reads as no preferences, never throws.
+  writeFileSync(join(home, ".pi", "agent", "pi-worktree", "config.json"), "{oops");
+  assert.deepEqual(await loadPrefs(home), {});
+});
+
+test("prefsPath falls back to ~/.pi/agent layout", () => {
+  assert.ok(prefsPath("/home/u").endsWith("/home/u/.pi/agent/pi-worktree/config.json"));
 });

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   parseShortstat,
   parseWorktreePorcelain,
+  porcelainPaths,
   resolveUniqueBranch,
   sanitizeBranchName,
   slugFromTask,
@@ -129,4 +130,9 @@ test("syncStoreWithGit never wipes on git failure", async () => {
   const exec: ExecFn = async () => ({ stdout: "", stderr: "boom", code: 128 });
   const synced = await syncStoreWithGit(exec, "/repo", dir);
   assert.equal(findByWorktree(synced, "/repo.worktrees/wt-a")?.status, "active");
+});
+
+test("porcelainPaths extracts paths, resolving renames", () => {
+  assert.deepEqual(porcelainPaths(" M src/git.ts\n?? new.txt\nR  old.ts -> new.ts\n"), ["src/git.ts", "new.txt", "new.ts"]);
+  assert.deepEqual(porcelainPaths(""), []);
 });
