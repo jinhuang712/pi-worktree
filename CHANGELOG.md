@@ -4,6 +4,11 @@ All notable changes to `pi-worktree` are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **One session, one tree.** A bare land/abandon resolves only the calling session's own link (or the worktree you're standing in) and never auto-grabs another session's worktree — the `Blocked: … belongs to another session` error is replaced by a `no-own-link` note that lists the others and leaves them alone. Naming a link explicitly still takes it over deliberately, flagged `foreign` with the previous owner named, and the model reports it in chat.
+- **Conflicts are the model's job.** `LAND CONFLICT` still names the files in one purple card, but instead of stopping for hand resolution the model reads each file, keeps the intended result from both sides, `git add`s and finishes — explaining what it kept. It only asks the user when both sides look deliberately contradictory.
+
 ### Fixed
 
 - **`/land` on an empty worktree cleans up instead of erroring.** Landing a worktree with no commits and no changes used to fail with `Nothing to land … Use worktree_abandon to drop the worktree`, forcing a second manual step. Now it removes the worktree directory, deletes the branch, clears the link and unbinds the session in one go (`LAND 【x -> main】 · nothing new · cleaned up`). `worktree_abandon` without `confirm:true` also drops empty worktrees immediately — confirmation is only needed when commits or dirty files would be lost.

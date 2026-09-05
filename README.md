@@ -222,7 +222,7 @@ Given origin `main` at `C` and worktree branch with `W1, W2`:
   main:     A --- B --- C --- [W1+W2]
 ```
 
-### Conflicts — the one full stop
+### Conflicts — the model resolves them
 
 ```text
   merge hits conflict
@@ -236,17 +236,14 @@ Given origin `main` at `C` and worktree branch with `W1, W2`:
   | |- file_b         |
   +-------------------+
         |
-        +-- model explains in its own words, asks how to proceed
-        +-- NEVER finish:true without your explicit consent
-        |
-        +-- you resolve by hand, `git add`, then:
-                /land            → concludes the merge
-                "abort"          → aborts it
+        +-- model reads each file, keeps the intended result from both
+        +-- sides, `git add`, finishes the land, explains the resolution
+        +-- only asks you when both sides look deliberately contradictory
 ```
 
-No popup, no auto-resolve. Resolve by hand and run `/land` again to conclude, or say the word to abort.
+No popup. The model handles it and tells you what it kept; you only get asked when the two sides genuinely contradict each other.
 
-Running `/land` at the origin lands the child this session owns; with several unowned children it says so instead of popping a picker, and another session's live worktree is refused instead of confirmed. `worktree_land` (the tool) never prompts and follows the remembered preference.
+Running `/land` at the origin lands the child this session owns and leaves other sessions' work alone (listed, untouched); with no own link it says so instead of popping a picker. Naming a branch/path explicitly takes it over deliberately, and the result notes the previous owner. `worktree_land` (the tool) never prompts and follows the remembered preference.
 
 ## Linkage — how sessions find each other
 
@@ -278,15 +275,15 @@ One file per link, in the shared git dir, so it survives `cd` and fresh sessions
 ```
 
 - Parallel sessions only write their own file, so no session can clobber another's link. A legacy single `pi-worktree.json` is migrated on first load.
-- Worktrees are session-exclusive: a link belongs to the session that created it. Landing another session's active link is blocked for tools (the model is told to ask you) and refused with a purple card for `/land` — unless you are standing inside that worktree, which counts as possession. Links created before ownership existed are unowned and landable by anyone.
+- Ownership scopes implicit work: a bare land/abandon resolves this session's own link (or the worktree you're standing in) and never auto-grabs another session's link. Naming a link explicitly takes it over deliberately — the result notes the previous owner (`foreign`), and the model says who owned it and what it did. Links created before ownership existed are unowned and landable by anyone.
 
 ```text
   who can land what?
   ------------------
 
   own link .............. YES
-  unowned legacy link ... YES
-  other session's link .. NO (ask first)
+  unowned legacy link ... YES (single, auto)
+  other session's link .. only when named explicitly (deliberate takeover, noted as foreign)
   standing inside it .... YES (possession counts)
 ```
 
@@ -300,7 +297,7 @@ Transcript contract: every pi-worktree action renders exactly one purple block �
 | --- | --- |
 | `worktree_status` | Branch, clean/dirty files, all worktrees, origin/child linkage and the session's bound worktree. Silent in the transcript (pure triage plumbing). The model calls this before risky edits to decide whether to isolate. |
 | `worktree_create` | The agent's `/worktree`: triages dirty files (`carryPaths`), names the branch itself (collisions auto-bump), binds the session, never prompts. Renders one purple `WORKTREE` block. |
-| `worktree_land` | The agent's `/land` with `strategy` (remembered preference when omitted), `finish:true` / `abort:true` for conflict flows. Renders one purple `LAND` block. Never `finish:true` on a conflict without the user's explicit consent. |
+| `worktree_land` | The agent's `/land` with `strategy` (remembered preference when omitted), `finish:true` / `abort:true` for conflict flows. Renders one purple `LAND` block. Resolves conflicts itself and explains; asks only on genuine contradiction. |
 | `worktree_abandon` | Discard a worktree without landing. A dry run without `confirm:true` reports the unlanded commits and dirty files to lose; the model must confirm with you before passing `confirm:true`. Renders one purple `ABANDON` block. |
 
 Every turn, a short policy section is appended to the system prompt:
@@ -308,13 +305,13 @@ Every turn, a short policy section is appended to the system prompt:
 - Bound → the working root, that paths are re-rooted, and to ask before `worktree_land` / `worktree_abandon`.
 - `CLEAN` plus an experimental, risky, or parallel task → proactively offer or call `worktree_create`.
 - `DIRTY` plus a new task → do not mix it into the dirty files; suggest `/worktree`.
-- Worktrees are session-exclusive: only land links owned by this session (or unowned legacy links). Never land another session's active worktree without asking the user first.
+- One session, one tree: a bare land/abandon resolves your own link and never auto-grabs another session's; name one explicitly only for a deliberate takeover.
 - Never run raw `git worktree add/remove` — use the tools so linkage stays consistent.
 
 ## Safety
 
 - Never force-pushes; never pushes at all.
-- Landing never uses `-D` (only `branch -d`, and keeps the branch when worktree removal fails). `worktree_abandon` does force-delete — after a dry run and explicit confirmation, and never `main`/`master` or another session's worktree.
+- Landing never uses `-D` (only `branch -d`, and keeps the branch when worktree removal fails). `worktree_abandon` does force-delete — after a dry run and explicit confirmation for non-empty worktrees (empty ones drop immediately), and never `main`/`master`.
 - Stash apply tries `--index` first, falls back to plain apply, and drops the stash only on success.
 - A failed rebase is aborted before falling back to merge; the worktree is never left mid-rebase.
 - Cleanup never touches `main`/`master`: no auto-delete, no `worktree remove` against a main working tree.
