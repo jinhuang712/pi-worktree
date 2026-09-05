@@ -66,15 +66,15 @@ What you see: exactly one purple card per action, details aligned under a `【he
 ```text
 🌲 WORKTREE 【main -> wt-http-retry】
               carrying 2 of 5 files · 3 left in origin
-              |- src/http.ts
-              |- test/http.test.ts
+              |-- src/http.ts
+              `-- test/http.test.ts
 
 🌲 LAND 【wt-http-retry -> main】 · rebase · a1b2c3d
        landing 2 commits · 4 files
-       |- feat(http): retry on 429
-       |- test(http): cover retry exhaustion
-       |- src/http.ts
-       |- ...
+       |-- feat(http): retry on 429
+       |-- test(http): cover retry exhaustion
+       |-- src/http.ts
+       `-- ...
 ```
 
 ## /worktree — isolate
@@ -232,8 +232,8 @@ Given origin `main` at `C` and worktree branch with `W1, W2`:
   | ⚠️ LAND CONFLICT  |
   | 【W -> main】     |
   | conflict in N     |
-  | |- file_a         |
-  | |- file_b         |
+  | |-- file_a         |
+  | `-- file_b         |
   +-------------------+
         |
         +-- model reads each file, keeps the intended result from both
@@ -289,7 +289,7 @@ One file per link, in the shared git dir, so it survives `cd` and fresh sessions
 
 The TUI widget shows readiness at a glance: `🌲 wt-fix-login → main · fix login retry · ↑3 · ↓1 · 2 dirty` (commits ahead, origin commits behind, uncommitted files), refreshed after every agent run. Origins show their own plus unowned children.
 
-Transcript contract: every pi-worktree action renders exactly one purple block — a caps `LABEL` plus the hero in `【】`, dim detail lines aligned underneath with `|-` trees (`WORKTREE`, `LAND`, `LAND CONFLICT`, `ABANDON`, `ERROR`; conflict files stay bright). No absolute paths, no green/red blocks; lists cap at 5–6 items and full output is one expand away. Cards signal state changes with the smallest effective payload — explanations and decisions belong to the model's own words.
+Transcript contract: every pi-worktree action renders exactly one purple block — a caps `LABEL` plus the hero in `【】`, dim detail lines aligned underneath with `|--`/`--` trees (`WORKTREE`, `LAND`, `LAND CONFLICT`, `ABANDON`, `ERROR`; conflict files stay bright). No absolute paths, no green/red blocks; lists cap at 5–6 items and full output is one expand away. Cards signal state changes with the smallest effective payload — explanations and decisions belong to the model's own words.
 
 ## Agent tools
 

@@ -335,7 +335,7 @@ export default function (pi: ExtensionAPI) {
 
   // Transcript visual language: every pi-worktree block is purple
   // (toolPendingBg). A caps LABEL plus the hero in 【】 lead; detail lines
-  // align under the hero with dim `|-` trees for item lists (conflict files
+  // align under the hero with dim `|--`/`--` trees for item lists (conflict files
   // stay bright — they need action). Emoji mark the
   // family: 🌲 worktree ops, ⚠️ conflicts, 🗑️ abandon, ❌ errors.
   // Cards signal state changes with the smallest effective payload —
@@ -380,8 +380,13 @@ export default function (pi: ExtensionAPI) {
 
   function treeLines(items: string[], max: number, indent: string, paint?: (s: string) => string): string[] {
     const line = (s: string) => (paint ? paint(s) : s);
-    const out = items.slice(0, max).map((f) => line(`${indent}|- ${f}`));
-    if (items.length > max) out.push(line(`${indent}|- … ${items.length - max} more`));
+    const shown = items.slice(0, max);
+    const truncated = items.length > max;
+    const out = shown.map((f, i) => {
+      const last = !truncated && i === shown.length - 1;
+      return line(`${indent}${last ? "`--" : "|--"} ${f}`);
+    });
+    if (truncated) out.push(line(`${indent}\`-- … ${items.length - max} more`));
     return out;
   }
 
