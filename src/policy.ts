@@ -33,6 +33,7 @@ export const WORKTREE_GUIDELINES = [
   "A bare worktree_land/worktree_abandon means YOUR tree: it resolves this session's own link (or the worktree you're standing in) and never auto-grabs another session's link. Name a branch/path explicitly only to deliberately take one over — then say who owned it and what you did.",
   "Conflicts are yours to resolve with worktree_land: read each conflicted file, keep the intended result from both sides, `git add`, then finish with finish:true. Explain the resolution; ask the user only when both sides look deliberately contradictory.",
   "One active worktree per session per repo: reuse the owned link instead of calling worktree_create again; call worktree_land first when its work is done.",
+  "If /worktree arrives with no task text, infer it from the conversation and the dirty files via worktree_status; when the workspace is clean and nothing is inferable, ask the user in one short question what to work on instead of stalling or inventing a placeholder branch.",
 ];
 
 function plural(n: number, noun: string): string {

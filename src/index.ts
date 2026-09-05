@@ -1428,9 +1428,9 @@ export default function (pi: ExtensionAPI) {
       const lines = [
         parsed.task
           ? `User ran /worktree for: "${parsed.task}".`
-          : "User ran /worktree with no task text — infer the pending task from the conversation first.",
+          : "User ran /worktree with no task text — infer the pending task from the conversation and the dirty files below. If the workspace is clean and nothing pending is inferable, ask the user in one short question what to work on instead of stalling or inventing a placeholder branch (this exception outranks 'never ask' below).",
         `Origin: ${facts.branch ?? "?"} @ ${facts.topLevel}.`,
-        "Isolate the work into a new linked worktree YOURSELF by calling worktree_create — never ask the user anything, never use raw git worktree commands.",
+        "Isolate the work into a new linked worktree YOURSELF by calling worktree_create — never use raw git worktree commands. Don't ask the user anything unless the no-task exception above applies.",
         "1. The dirty files are listed below — triage from this list. Call worktree_status only if you need more (current branch, existing worktrees).",
         parsed.carry
           ? "2. Triage uncommitted changes: carry only files related to this task via `carryPaths`; leave unrelated files untouched in the origin. If everything dirty belongs here, omit `carryPaths` to carry all. If you carry selectively, tell the user in one line which files you left behind and why."
