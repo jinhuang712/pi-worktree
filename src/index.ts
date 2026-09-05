@@ -654,9 +654,9 @@ export default function (pi: ExtensionAPI) {
     remove: boolean;
     finish: boolean;
     abort: boolean;
-    /** Current pi session id — gates session-exclusive links. */
+    /** Current pi session id — recorded on links for visibility; ownership is advisory, never blocking. */
     sessionId?: string | null;
-    /** Slash-side override for foreign-owned links (confirm dialog). Tools omit it → hard deny. */
+    /** Optional cancel hook for foreign-owned links. Omit it and the land proceeds with a foreign:true flag for the model to report. */
     confirmForeign?: (links: WorktreeLink[]) => Promise<boolean>;
     /** Slash-side picker when several children hang off this origin. */
     pickChild?: (kids: WorktreeLink[]) => Promise<WorktreeLink | undefined>;
@@ -700,24 +700,33 @@ export default function (pi: ExtensionAPI) {
       targetPath = link.originPath;
       targetBranch = link.originBranch ?? undefined;
     } else if (!opts.to) {
+      // One session, one tree: a bare land means "land MY tree". Resolve only
+      // the owning session's link (or a single unowned link nobody would miss).
+      // Other sessions' worktrees are listed for visibility and left untouched —
+      // taking one over requires naming it explicitly (deliberate intent).
       const kids = childrenOf(store, canon);
       const mine = opts.sessionId ? kids.find((k) => k.sessionId === opts.sessionId) : undefined;
       if (mine) {
         await flipTo(mine);
-      } else if (kids.length === 1) {
+      } else if (kids.length === 1 && !foreignOwnerOf(kids[0], opts.sessionId, canon)) {
         await flipTo(kids[0]);
-      } else if (kids.length > 1) {
+      } else if (kids.length > 0) {
         const picked = opts.pickChild ? await opts.pickChild(kids) : undefined;
-        if (!picked) {
-          const names = kids.map((k) => `${k.branch} @ ${k.worktreePath}${k.task ? ` — ${truncateMiddle(k.task, 40)}` : ""}`).join("\n");
+        if (picked) {
+          await flipTo(picked);
+        } else if (opts.pickChild) {
+          return { text: "Cancelled.", details: { ok: false, reason: "cancelled" } };
+        } else {
+          const others = kids.map((k) => `\`${k.branch}\` ${ownerLabel(k, opts.sessionId)}${k.task ? ` — ${truncateMiddle(k.task, 40)}` : ""}`).join("\n");
           return {
-            text: opts.pickChild
-              ? "Cancelled."
-              : `Multiple active worktrees hang off this origin. Specify which one (branch or path) and retry:\n${names}`,
-            details: { ok: false, reason: opts.pickChild ? "cancelled" : "ambiguous-child", children: kids },
+            text: [
+              `This session has no linked worktree to land — leaving other sessions' work alone:`,
+              others,
+              `To land one of these, run /land from its owning session, stand inside that worktree, or name it explicitly to take it over deliberately.`,
+            ].join("\n"),
+            details: { ok: false, reason: "no-own-link", children: kids },
           };
         }
-        await flipTo(picked);
       }
     }
     if (opts.to) {
@@ -785,24 +794,23 @@ export default function (pi: ExtensionAPI) {
     }
     if (!targetBranch) targetBranch = (await collectFacts(exec, targetPath))?.branch ?? undefined;
 
-    // Session exclusivity: never silently touch another session's live worktree.
+    // Ownership scopes implicit resolution (above), never explicit intent: naming
+    // a branch/path or standing inside its worktree is deliberate, so it proceeds
+    // with a foreign flag for the model to report. Edge cases are the model's job.
+    // confirmForeign (slash) may still cancel.
+    let foreign: WorktreeLink[] = [];
+    let foreignNote: string | null = null;
     {
       const candidates = [link, findByWorktree(store, targetPath)];
-      const foreign = [...new Set(candidates.filter((l): l is WorktreeLink => !!l))]
+      foreign = [...new Set(candidates.filter((l): l is WorktreeLink => !!l))]
         .map((l) => foreignOwnerOf(l, opts.sessionId, canon))
         .filter((l): l is WorktreeLink => !!l);
       if (foreign.length > 0) {
         const who = foreign.map((l) => `\`${l.branch}\` ${ownerLabel(l, opts.sessionId)}`).join(", ");
-        if (opts.confirmForeign) {
-          if (!(await opts.confirmForeign(foreign))) {
-            return { text: "Cancelled — left the other session's worktree alone.", details: { ok: false, reason: "cancelled" } };
-          }
-        } else {
-          return {
-            text: `Blocked: ${who} belongs to another session. Ask the user before landing it — pass an explicit target from the owning session instead.`,
-            details: { ok: false, reason: "owned-by-other", branches: foreign.map((l) => l.branch) },
-          };
+        if (opts.confirmForeign && !(await opts.confirmForeign(foreign))) {
+          return { text: "Cancelled — left the other session's worktree alone.", details: { ok: false, reason: "cancelled" } };
         }
+        foreignNote = `Note: ${who} was owned by another session — proceeded anyway. Say who owned it and what you did in your own words.`;
       }
     }
 
@@ -871,8 +879,8 @@ export default function (pi: ExtensionAPI) {
         const kept = cleanup && !cleanup.startsWith("Cleaned up") ? cleanup.split("\n")[0] : null;
         if (!kept) {
           return {
-            text: `Nothing to land: \`${sourceBranch}\` was empty — cleaned up.`,
-            details: { ok: true, empty: true, cleaned: true, branch: sourceBranch, dest: targetBranch, strategy: opts.strategy, sha: null, cleanup },
+            text: [`Nothing to land: \`${sourceBranch}\` was empty — cleaned up.`, foreignNote ?? ""].filter(Boolean).join("\n"),
+            details: { ok: true, empty: true, cleaned: true, branch: sourceBranch, dest: targetBranch, strategy: opts.strategy, sha: null, cleanup, foreign: foreign.map((l) => l.branch) },
             link,
           };
         }
@@ -956,9 +964,10 @@ export default function (pi: ExtensionAPI) {
           text: [
             `Merge conflict landing \`${sourceBranch}\` into ${targetPath}${merged.note ? ` (${merged.note})` : ""}.`,
             `Conflicted files:\n${merged.conflicted.map((f) => `  ${f}`).join("\n")}`,
-            `Resolve files in ${targetPath}, \`git add\` them, then finish the land (worktree_land finish:true). To abandon it, abort (worktree_land abort:true).`,
-          ].join("\n"),
-          details: { ok: false, reason: "conflict", conflicted: merged.conflicted, target: targetPath, source: sourcePath, output: merged.output, branch: sourceBranch, dest: targetBranch },
+            `Handle it yourself: read each conflicted file, keep the intended result from both sides (task changes win on task files, origin changes win elsewhere), \`git add\` them, then finish the land (worktree_land finish:true). To throw the work away instead, abort (worktree_land abort:true). Only ask the user when both sides look deliberately contradictory and you cannot tell which is intended.`,
+            foreignNote ?? "",
+          ].filter(Boolean).join("\n"),
+          details: { ok: false, reason: "conflict", conflicted: merged.conflicted, target: targetPath, source: sourcePath, output: merged.output, branch: sourceBranch, dest: targetBranch, foreign: foreign.map((l) => l.branch) },
           link: link ?? undefined,
         };
       }
@@ -983,12 +992,13 @@ export default function (pi: ExtensionAPI) {
         targetCheckpoint ? `Target had pending changes — checkpointed as ${shortSha(targetCheckpoint)} before landing.` : "",
         merged.output,
         cleanup,
+        foreignNote ?? "",
       ].filter(Boolean).join("\n"),
       details: {
         ok: true, sha, target: targetPath, source: sourcePath, strategy: label,
         note: merged.note, cleanup, targetCheckpoint, branch: sourceBranch, dest: targetBranch,
         ahead: landed.ahead, stat: landed.stat, names: landed.names, subjects: landed.subjects,
-        checkpoints, kept,
+        checkpoints, kept, foreign: foreign.map((l) => l.branch),
       },
       link: link ?? undefined,
     };
@@ -1063,12 +1073,12 @@ export default function (pi: ExtensionAPI) {
     if (!link) {
       return { text: "No active linked worktree to abandon here. Name its branch or path.", details: { ok: false, reason: "no-link" } };
     }
-    if (foreignOwnerOf(link, opts.sessionId, canon)) {
-      return {
-        text: `Blocked: \`${link.branch}\` belongs to another session ${ownerLabel(link, opts.sessionId)}. Ask the user; abandon it from the owning session.`,
-        details: { ok: false, reason: "owned-by-other", branch: link.branch },
-      };
-    }
+    // Ownership is advisory, never a hard stop — same rule as land. The model
+    // names the previous owner in chat; empty worktrees drop immediately,
+    // non-empty ones still need confirm:true (model confirms with the user
+    // in chat first, then calls again).
+    const foreignLink = foreignOwnerOf(link, opts.sessionId, canon);
+    const foreignSuffix = foreignLink ? ` (was owned by another session ${ownerLabel(link, opts.sessionId)} — proceeding anyway; say so in chat)` : "";
     if (link.branch === "main" || link.branch === "master") {
       return { text: `Refusing to abandon \`${link.branch}\`.`, details: { ok: false, reason: "protected-branch" } };
     }
@@ -1086,8 +1096,8 @@ export default function (pi: ExtensionAPI) {
     // This keeps `worktree_abandon` one-shot for the exact case /land auto-cleans.
     if (!opts.confirm && (ab.ahead > 0 || dirty > 0)) {
       return {
-        text: `Would discard ${summary}\nThis deletes the worktree directory and the branch permanently. Confirm with the user, then call again with confirm:true.`,
-        details: { ok: false, reason: "needs-confirm", branch: link.branch, commits: ab.ahead, dirty },
+        text: `Would discard ${summary}${foreignSuffix}\nThis deletes the worktree directory and the branch permanently. Confirm with the user, then call again with confirm:true.`,
+        details: { ok: false, reason: "needs-confirm", branch: link.branch, commits: ab.ahead, dirty, foreign: foreignLink ? link.branch : undefined },
       };
     }
 
@@ -1102,8 +1112,8 @@ export default function (pi: ExtensionAPI) {
     await recordEvent({ kind: "abandon", branch: link.branch, path: link.worktreePath, commits: ab.ahead, dirty });
     const branchNote = del.code === 0 ? `branch \`${link.branch}\` deleted` : `branch \`${link.branch}\` kept (delete failed)`;
     return {
-      text: `Abandoned ${summary} Worktree removed, ${branchNote}.`,
-      details: { ok: true, branch: link.branch, commits: ab.ahead, dirty },
+      text: `Abandoned ${summary}${foreignSuffix} Worktree removed, ${branchNote}.`,
+      details: { ok: true, branch: link.branch, commits: ab.ahead, dirty, foreign: foreignLink ? link.branch : undefined },
       link,
     };
   }
@@ -1226,8 +1236,9 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Land a linked worktree back into its origin",
     promptGuidelines: [
       "Use worktree_land to finish work inside a linked worktree instead of raw git merge commands.",
-      "On conflict, report to the user and wait for direction — never call finish:true on a conflicted merge without explicit user consent.",
+      "On conflict, resolve it yourself: read each conflicted file, keep the intended result from both sides, `git add`, then finish with finish:true. Explain the resolution in your own words; ask the user only when both sides look deliberately contradictory.",
       "Empty worktrees (no commits, clean) land as immediate cleanup with no confirmation needed — just call worktree_land.",
+      "A bare land means YOUR tree: the tool resolves this session's own link (or the worktree you're standing in) and never auto-grabs another session's link. Name a branch/path explicitly only to deliberately take it over — then say who owned it and what you did.",
     ],
     parameters: Type.Object({
       target: Type.Optional(Type.String({ description: "Origin worktree path or branch. Auto-detected from linkage when omitted." })),
@@ -1517,9 +1528,9 @@ export default function (pi: ExtensionAPI) {
       if (rd.ok) await unbindSession(ctx, result.link);
       if (!ui) emit(ctx, result.text, rd.ok ? "info" : "error");
 
-      // Conflict is the one full stop: purple card, then the model speaks —
-      // explains in its own words, asks how to proceed, and never resolves
-      // or finishes without explicit user consent.
+      // Conflict is the model's job, not the user's: it resolves, finishes and
+      // explains. The card carries the file list; the instruction below tells
+      // the model to handle it and only escalate genuine ambiguity.
       if (!rd.ok && rd.reason === "conflict") {
         const branch = rd.branch ?? "?";
         const dest = rd.dest ?? "?";
@@ -1528,7 +1539,7 @@ export default function (pi: ExtensionAPI) {
             customType: CARD_TYPE,
             content: [
               result.text,
-              `Explain to the user in your own words what clashed and ask how to proceed (options: you resolve it now / they resolve it themselves and run /land again / abort the merge). Do NOT edit anything, resolve anything, or call worktree_land finish:true without explicit user consent.`,
+              `Resolve it yourself: read each conflicted file, keep the intended result from both sides (task changes win on task files, origin changes win elsewhere), \`git add\` them, then finish with worktree_land finish:true (or conclude the /land). If you genuinely cannot tell which side is intended because both look deliberate, ask the user with both versions quoted. Explain the resolution in your own words when done.`,
             ].join("\n"),
             display: true,
             details: {

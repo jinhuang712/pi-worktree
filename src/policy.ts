@@ -30,7 +30,8 @@ export const WORKTREE_GUIDELINES = [
   "When the workspace is CLEAN and the task is experimental, risky, or explicitly parallel, proactively offer or call worktree_create instead of editing in place.",
   "Never run raw `git worktree add/remove` shell commands; use the worktree_* tools so origin linkage stays consistent.",
   "When work in a linked worktree is finished, ask the user before calling worktree_land — never land or merge silently. Empty worktrees (no commits, clean) are the exception: land/abandon cleans them up immediately with no confirmation needed.",
-  "Treat linked worktrees as session-exclusive: only call worktree_land on links owned by this session (or unowned legacy links); if a link belongs to another session, ask the user before touching it.",
+  "A bare worktree_land/worktree_abandon means YOUR tree: it resolves this session's own link (or the worktree you're standing in) and never auto-grabs another session's link. Name a branch/path explicitly only to deliberately take one over — then say who owned it and what you did.",
+  "Conflicts are yours to resolve with worktree_land: read each conflicted file, keep the intended result from both sides, `git add`, then finish with finish:true. Explain the resolution; ask the user only when both sides look deliberately contradictory.",
   "One active worktree per session per repo: reuse the owned link instead of calling worktree_create again; call worktree_land first when its work is done.",
 ];
 
@@ -73,6 +74,7 @@ export function buildPolicySection(f: PolicyFacts): string {
     }
   }
   lines.push("- Never run raw `git worktree add/remove`; use the worktree_* tools so linkage stays consistent.");
-  lines.push("- Worktrees are session-exclusive: only land links owned by this session (or unowned legacy links). Never land another session's active worktree without asking the user first.");
+  lines.push("- A bare land/abandon means YOUR tree: this session's own link (or the worktree you're standing in). Never auto-grab another session's link; name it explicitly only for a deliberate takeover, then say who owned it.");
+  lines.push("- Conflicts are yours to resolve: read, merge sensibly, `git add`, finish with finish:true, explain. Ask only when both sides look deliberately contradictory.");
   return lines.join("\n");
 }
