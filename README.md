@@ -184,6 +184,7 @@ Land straight back into the origin — zero popups. Direction is DWIM: standing 
 
 - **Strategy is asked once, remembered everywhere** (`~/.pi/agent/pi-worktree/config.json`). First `/land` asks rebase / squash / merge a single time; from then on that mode is the default and every land line shows it. An explicit `--strategy` wins for that run and becomes the new default.
 - Pending changes on both sides are checkpoint-committed first (the worktree's uses the task as its subject, the origin's is marked `wip(<branch>): checkpoint before landing …`) and folded into one trailing dim note per side (`checkpointed N files on <branch> as "<subject>"`) — auto-created commits stay visible without a second hero block.
+- Empty worktrees land as cleanup: no commits and no changes means the worktree directory is removed, the branch deleted and the session unbound in the same `/land` — no second `abandon` step.
 
 ```text
 /land

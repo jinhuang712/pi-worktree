@@ -353,6 +353,10 @@ export default function (pi: ExtensionAPI) {
     ahead?: number; stat?: DiffStat; names?: string[]; subjects?: string[];
     checkpoints?: CheckpointInfo[]; kept?: string | null; finished?: boolean;
     conflicted?: string[]; reason?: string;
+    /** True when there was nothing to merge (0 commits, clean). */
+    empty?: boolean;
+    /** True when the empty worktree was auto-removed. */
+    cleaned?: boolean;
   }
 
   type CardDetails =
@@ -415,9 +419,14 @@ export default function (pi: ExtensionAPI) {
       ].join("\n");
     }
     if (!d.ok && d.reason === "nothing-to-land") {
-      return [`🌲 LAND ${hero}`, `${heroIndent("LAND")}${ink.dim("nothing new · abandon to drop")}`].join("\n");
+      return [`🌲 LAND ${hero}`, `${heroIndent("LAND")}${ink.dim("nothing new · nothing to clean")}`].join("\n");
     }
     if (!d.ok) return ink.error(`❌ ${firstLine(full)}`);
+    if (d.empty) {
+      const pad = heroIndent("LAND");
+      const note = d.cleaned ? "nothing new · cleaned up" : "nothing new";
+      return [`🌲 LAND ${hero} ${ink.dim(`· ${note}`)}`].join("\n");
+    }
     const pad = heroIndent("LAND");
     const meta = [d.strategy, d.sha ? shortSha(d.sha) : ""].filter(Boolean).join(" · ");
     const lines = [`🌲 LAND ${hero}${meta ? ` ${ink.dim(`· ${meta}`)}` : ""}`];
@@ -853,8 +862,42 @@ export default function (pi: ExtensionAPI) {
       message: defaultMsg,
     };
     if (preview.ahead === 0 && preview.dirtySource === 0) {
+      // Empty worktree: nothing would be lost by removing it, so just do it.
+      // This is the "替用户做了" path — /land on an empty worktree cleans up
+      // instead of erroring with "use worktree_abandon to drop".
+      if (link && opts.remove && !samePath(canon, sourcePath)) {
+        const cleanup = await cleanupWorktree(exec, commonDir, link, sourcePath, sourceBranch, targetPath);
+        await recordEvent({ kind: "land-empty-cleanup", source: sourcePath, target: targetPath, branch: sourceBranch });
+        const kept = cleanup && !cleanup.startsWith("Cleaned up") ? cleanup.split("\n")[0] : null;
+        if (!kept) {
+          return {
+            text: `Nothing to land: \`${sourceBranch}\` was empty — cleaned up.`,
+            details: { ok: true, empty: true, cleaned: true, branch: sourceBranch, dest: targetBranch, strategy: opts.strategy, sha: null, cleanup },
+            link,
+          };
+        }
+        // Cleanup refused (e.g. protected branch): surface the reason, no second step.
+        return {
+          text: `Nothing to land: \`${sourceBranch}\` is empty. ${kept}`,
+          details: { ok: true, empty: true, cleaned: false, branch: sourceBranch, dest: targetBranch, strategy: opts.strategy, sha: null, kept },
+          link,
+        };
+      }
+      if (link && samePath(canon, sourcePath)) {
+        return {
+          text: `Nothing to land: \`${sourceBranch}\` is empty. You are standing inside it — go back to \`${targetBranch ?? "origin"}\` (${targetPath}) and run /land again to clean it up.`,
+          details: { ok: false, reason: "standing-inside-empty", branch: sourceBranch, dest: targetBranch },
+        };
+      }
+      if (link && !opts.remove) {
+        return {
+          text: `Nothing to land: \`${sourceBranch}\` is empty — kept (remove:false).`,
+          details: { ok: true, empty: true, cleaned: false, branch: sourceBranch, dest: targetBranch, strategy: opts.strategy, sha: null },
+          link,
+        };
+      }
       return {
-        text: `Nothing to land: \`${sourceBranch}\` has no commits or changes beyond \`${targetBranch ?? "origin"}\`.${link ? " Use worktree_abandon to drop the worktree." : ""}`,
+        text: `Nothing to land: \`${sourceBranch}\` has no commits or changes beyond \`${targetBranch ?? "origin"}\`.`,
         details: { ok: false, reason: "nothing-to-land", branch: sourceBranch, dest: targetBranch },
       };
     }
@@ -1039,7 +1082,9 @@ export default function (pi: ExtensionAPI) {
     const ab = link.originBranch ? await aheadBehind(exec, link.worktreePath, link.originBranch, "HEAD") : { ahead: 0, behind: 0 };
     const dirty = (await getStatusPorcelain(exec, link.worktreePath)).porcelain.split("\n").filter(Boolean).length;
     const summary = `\`${link.branch}\`${link.task ? ` (${truncateMiddle(link.task, 40)})` : ""}: ${ab.ahead} unlanded commit${ab.ahead === 1 ? "" : "s"}, ${dirty} dirty file${dirty === 1 ? "" : "s"}.`;
-    if (!opts.confirm) {
+    // Empty worktree: nothing to lose, so drop it immediately — no confirm dance.
+    // This keeps `worktree_abandon` one-shot for the exact case /land auto-cleans.
+    if (!opts.confirm && (ab.ahead > 0 || dirty > 0)) {
       return {
         text: `Would discard ${summary}\nThis deletes the worktree directory and the branch permanently. Confirm with the user, then call again with confirm:true.`,
         details: { ok: false, reason: "needs-confirm", branch: link.branch, commits: ab.ahead, dirty },
@@ -1103,7 +1148,7 @@ export default function (pi: ExtensionAPI) {
       "Use worktree_create to isolate experimental, risky, or parallel work — never raw git worktree commands.",
       "Always pass an explicit `branch`: name it after the work, never a fixed or date-based format.",
       "When the workspace is dirty, triage first (worktree_status): carry only files related to the task via `carryPaths`; leave unrelated files untouched in the origin.",
-      "When work in the new worktree is finished, ask the user before landing instead of calling worktree_land silently.",
+      "When work in the new worktree is finished, ask the user before landing instead of calling worktree_land silently (empty worktrees are the exception — just land to clean up).",
     ],
     parameters: Type.Object({
       task: Type.Optional(Type.String({ description: "One line describing the work. Becomes the land commit subject." })),
@@ -1182,6 +1227,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use worktree_land to finish work inside a linked worktree instead of raw git merge commands.",
       "On conflict, report to the user and wait for direction — never call finish:true on a conflicted merge without explicit user consent.",
+      "Empty worktrees (no commits, clean) land as immediate cleanup with no confirmation needed — just call worktree_land.",
     ],
     parameters: Type.Object({
       target: Type.Optional(Type.String({ description: "Origin worktree path or branch. Auto-detected from linkage when omitted." })),
@@ -1239,6 +1285,8 @@ export default function (pi: ExtensionAPI) {
         finished: d.finished === true ? true : undefined,
         conflicted: Array.isArray(d.conflicted) ? d.conflicted.map(String) : undefined,
         reason: typeof d.reason === "string" ? d.reason : undefined,
+        empty: d.empty === true ? true : undefined,
+        cleaned: d.cleaned === true ? true : undefined,
       }, ink, full));
     },
   });
@@ -1247,7 +1295,7 @@ export default function (pi: ExtensionAPI) {
     name: "worktree_abandon",
     label: "Worktree Abandon",
     description:
-      "Discard a linked worktree without landing: removes the directory and deletes its branch. Without confirm:true it only reports what would be lost — confirm with the user first.",
+      "Discard a linked worktree without landing: removes the directory and deletes its branch. Empty worktrees (no commits, clean) are removed immediately; otherwise without confirm:true it only reports what would be lost — confirm with the user first.",
     parameters: Type.Object({
       target: Type.Optional(Type.String({ description: "Branch or path of the worktree. Defaults to this session's bound worktree." })),
       confirm: Type.Optional(Type.Boolean({ description: "Actually delete. Default false = dry run." })),
@@ -1460,7 +1508,7 @@ export default function (pi: ExtensionAPI) {
         branch?: string | null; dest?: string; source?: string; target?: string;
         ahead?: number; stat?: DiffStat; names?: string[]; subjects?: string[];
         checkpoints?: CheckpointInfo[]; kept?: string | null; finished?: boolean;
-        conflicted?: string[];
+        conflicted?: string[]; empty?: boolean; cleaned?: boolean;
       };
       if (rd.reason === "cancelled") {
         emit(ctx, "Cancelled — pick a strategy next time and it sticks.", "info");
@@ -1507,6 +1555,7 @@ export default function (pi: ExtensionAPI) {
               strategy: rd.strategy ?? DEFAULT_STRATEGY, sha: rd.sha ?? null,
               ahead: rd.ahead, stat: rd.stat, names: rd.names, subjects: rd.subjects,
               checkpoints: rd.checkpoints, kept: rd.kept ?? null, finished: rd.finished,
+              empty: rd.empty, cleaned: rd.cleaned,
             } satisfies CardDetails,
           },
           { triggerTurn: true },

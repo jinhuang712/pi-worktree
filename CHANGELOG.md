@@ -4,6 +4,10 @@ All notable changes to `pi-worktree` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/land` on an empty worktree cleans up instead of erroring.** Landing a worktree with no commits and no changes used to fail with `Nothing to land … Use worktree_abandon to drop the worktree`, forcing a second manual step. Now it removes the worktree directory, deletes the branch, clears the link and unbinds the session in one go (`LAND 【x -> main】 · nothing new · cleaned up`). `worktree_abandon` without `confirm:true` also drops empty worktrees immediately — confirmation is only needed when commits or dirty files would be lost.
+
 ### Changed
 
 - **Transcript visual language.** Every action renders exactly one purple block: a caps `LABEL` plus the hero in `【】` (`WORKTREE 【main -> x】`, `LAND 【x -> main】`), detail lines aligned underneath with `|-` trees for carried files, landed commits/subjects, and conflicted files. No absolute paths, no green/red blocks; lists cap at 5–6 items, full output one expand away. Cards signal with the smallest effective payload — explanations belong to the model's words.
