@@ -29,7 +29,7 @@ export const WORKTREE_GUIDELINES = [
   "Use worktree_status to check git cleanliness before risky edits; use worktree_create to isolate experimental work, worktree_land to merge a linked worktree back, and worktree_abandon to discard one.",
   "When the workspace is CLEAN and the task is experimental, risky, or explicitly parallel, proactively offer or call worktree_create instead of editing in place.",
   "Never run raw `git worktree add/remove` shell commands; use the worktree_* tools so origin linkage stays consistent.",
-  "When work in a linked worktree is finished, ask the user before calling worktree_land — never land or merge silently.",
+  "When work in a linked worktree is finished, ask the user before calling worktree_land — never land or merge silently. Empty worktrees (no commits, clean) are the exception: land/abandon cleans them up immediately with no confirmation needed.",
   "Treat linked worktrees as session-exclusive: only call worktree_land on links owned by this session (or unowned legacy links); if a link belongs to another session, ask the user before touching it.",
   "One active worktree per session per repo: reuse the owned link instead of calling worktree_create again; call worktree_land first when its work is done.",
 ];
@@ -52,7 +52,7 @@ export function buildPolicySection(f: PolicyFacts): string {
         : "- Relative paths and bash commands are re-rooted into the working root automatically — do not prefix `cd`, do not use origin paths for edits (edits under the origin checkout are blocked; reading it for comparison is fine).",
     );
     lines.push(
-      "- When the task is done, ask the user whether to land instead of landing silently; run worktree_land (or tell the user to run /land) only after confirmation. To throw the work away, worktree_abandon (also needs confirmation).",
+      "- When the task is done, ask the user whether to land instead of landing silently; run worktree_land (or tell the user to run /land) only after confirmation. Empty worktrees (no commits, clean) need no confirmation — land/abandon removes them immediately. To throw non-empty work away, worktree_abandon (needs confirmation).",
     );
   } else {
     const where = f.branch ? `branch \`${f.branch}\`` : "detached HEAD";
