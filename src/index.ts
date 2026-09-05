@@ -335,7 +335,8 @@ export default function (pi: ExtensionAPI) {
 
   // Transcript visual language: every pi-worktree block is purple
   // (toolPendingBg). A caps LABEL plus the hero in 【】 lead; detail lines
-  // align under the hero with `|-` trees for item lists. Emoji mark the
+  // align under the hero with dim `|-` trees for item lists (conflict files
+  // stay bright — they need action). Emoji mark the
   // family: 🌲 worktree ops, ⚠️ conflicts, 🗑️ abandon, ❌ errors.
   // Cards signal state changes with the smallest effective payload —
   // explanations and decisions belong to the model's own words, and full
@@ -373,9 +374,10 @@ export default function (pi: ExtensionAPI) {
     return `${n} ${noun}${n === 1 ? "" : "s"}`;
   }
 
-  function treeLines(items: string[], max: number, indent: string): string[] {
-    const out = items.slice(0, max).map((f) => `${indent}|- ${f}`);
-    if (items.length > max) out.push(`${indent}|- … ${items.length - max} more`);
+  function treeLines(items: string[], max: number, indent: string, paint?: (s: string) => string): string[] {
+    const line = (s: string) => (paint ? paint(s) : s);
+    const out = items.slice(0, max).map((f) => line(`${indent}|- ${f}`));
+    if (items.length > max) out.push(line(`${indent}|- … ${items.length - max} more`));
     return out;
   }
 
@@ -398,7 +400,7 @@ export default function (pi: ExtensionAPI) {
       : d.selective
         ? `carrying ${d.carried.length} of ${d.total} files · ${d.total - d.carried.length} left in origin`
         : `carrying ${count("file", d.carried.length)}`;
-    return [head, `${pad}${ink.dim(summary)}`, ...treeLines(d.carried, TREE_MAX_FILES, pad)].join("\n");
+    return [head, `${pad}${ink.dim(summary)}`, ...treeLines(d.carried, TREE_MAX_FILES, pad, ink.dim)].join("\n");
   }
 
   function landText(d: LandView, ink: { hero: (s: string) => string; dim: (s: string) => string; error: (s: string) => string }, full: string): string {
@@ -419,17 +421,22 @@ export default function (pi: ExtensionAPI) {
     const pad = heroIndent("LAND");
     const meta = [d.strategy, d.sha ? shortSha(d.sha) : ""].filter(Boolean).join(" · ");
     const lines = [`🌲 LAND ${hero}${meta ? ` ${ink.dim(`· ${meta}`)}` : ""}`];
-    for (const c of d.checkpoints ?? []) {
-      lines.push(`🌲 DIRTY WORKTREE ${ink.hero(`【${c.branch}】`)}`);
-      const cp = heroIndent("DIRTY WORKTREE");
-      lines.push(`${cp}${ink.dim(`checkpointed ${count("file", c.paths.length)} as "${truncateMiddle(c.subject, 48)}"`)}`);
-      lines.push(...treeLines(c.paths, TREE_MAX_FILES, cp));
-    }
     if (d.finished) lines.push(`${pad}${ink.dim("merge concluded")}`);
-    if (d.ahead !== undefined) lines.push(`${pad}${ink.dim(`landing ${count("commit", d.ahead)}`)}`);
-    lines.push(...treeLines(d.subjects ?? [], TREE_MAX_COMMITS, pad));
-    if (d.stat) lines.push(`${pad}${ink.dim(`landing ${count("file", d.stat.files)}`)}`);
-    lines.push(...treeLines(d.names ?? [], TREE_MAX_FILES, pad));
+    // One summary line instead of two: `landing 2 commits · 4 files`.
+    // Trees are dim footnotes — the hero already carries the signal.
+    const summary: string[] = [];
+    if (d.ahead !== undefined && d.stat) summary.push(`landing ${count("commit", d.ahead)} · ${count("file", d.stat.files)}`);
+    else if (d.ahead !== undefined) summary.push(`landing ${count("commit", d.ahead)}`);
+    else if (d.stat) summary.push(`landing ${count("file", d.stat.files)}`);
+    if (summary.length) lines.push(`${pad}${ink.dim(summary.join(" · "))}`);
+    lines.push(...treeLines(d.subjects ?? [], TREE_MAX_COMMITS, pad, ink.dim));
+    lines.push(...treeLines(d.names ?? [], TREE_MAX_FILES, pad, ink.dim));
+    // Checkpoints fold into trailing dim notes — no second hero header, no
+    // file tree. The file list already appears in the landed names below,
+    // but the checkpoint subject (the auto-commit message) is kept.
+    for (const c of d.checkpoints ?? []) {
+      lines.push(`${pad}${ink.dim(`checkpointed ${count("file", c.paths.length)} on ${c.branch} as "${truncateMiddle(c.subject, 48)}"`)}`);
+    }
     if (d.kept) lines.push(`${pad}${ink.dim(d.kept)}`);
     return lines.join("\n");
   }

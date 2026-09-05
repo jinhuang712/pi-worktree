@@ -70,10 +70,9 @@ What you see: exactly one purple card per action, details aligned under a `【he
               |- test/http.test.ts
 
 🌲 LAND 【wt-http-retry -> main】 · rebase · a1b2c3d
-       landing 2 commits
+       landing 2 commits · 4 files
        |- feat(http): retry on 429
        |- test(http): cover retry exhaustion
-       landing 4 files
        |- src/http.ts
        |- ...
 ```
@@ -184,7 +183,7 @@ Land straight back into the origin — zero popups. Direction is DWIM: standing 
 ```
 
 - **Strategy is asked once, remembered everywhere** (`~/.pi/agent/pi-worktree/config.json`). First `/land` asks rebase / squash / merge a single time; from then on that mode is the default and every land line shows it. An explicit `--strategy` wins for that run and becomes the new default.
-- Pending changes on both sides are checkpoint-committed first (the worktree's uses the task as its subject, the origin's is marked `wip(<branch>): checkpoint before landing …`) and announced as their own `DIRTY WORKTREE` section — auto-created commits stay visible.
+- Pending changes on both sides are checkpoint-committed first (the worktree's uses the task as its subject, the origin's is marked `wip(<branch>): checkpoint before landing …`) and folded into one trailing dim note per side (`checkpointed N files on <branch> as "<subject>"`) — auto-created commits stay visible without a second hero block.
 
 ```text
 /land
@@ -292,7 +291,7 @@ One file per link, in the shared git dir, so it survives `cd` and fresh sessions
 
 The TUI widget shows readiness at a glance: `🌲 wt-fix-login → main · fix login retry · ↑3 · ↓1 · 2 dirty` (commits ahead, origin commits behind, uncommitted files), refreshed after every agent run. Origins show their own plus unowned children.
 
-Transcript contract: every pi-worktree action renders exactly one purple block — a caps `LABEL` plus the hero in `【】`, detail lines aligned underneath with `|-` trees (`WORKTREE`, `LAND`, `LAND CONFLICT`, `DIRTY WORKTREE`, `ABANDON`, `ERROR`). No absolute paths, no green/red blocks; lists cap at 5–6 items and full output is one expand away. Cards signal state changes with the smallest effective payload — explanations and decisions belong to the model's own words.
+Transcript contract: every pi-worktree action renders exactly one purple block — a caps `LABEL` plus the hero in `【】`, dim detail lines aligned underneath with `|-` trees (`WORKTREE`, `LAND`, `LAND CONFLICT`, `ABANDON`, `ERROR`; conflict files stay bright). No absolute paths, no green/red blocks; lists cap at 5–6 items and full output is one expand away. Cards signal state changes with the smallest effective payload — explanations and decisions belong to the model's own words.
 
 ## Agent tools
 
