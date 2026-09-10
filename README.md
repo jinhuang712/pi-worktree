@@ -61,21 +61,23 @@ Restart Pi after installation so it discovers the extension.
 /land
 ```
 
-What you see: exactly one purple card per action, details aligned under a `【hero】`, item lists capped at 5-6 entries:
+What you see: exactly one purple card per action, one diagram tree under the `【hero】`, every item listed (no caps), file rows aligned as a table — status letter (`N` new, `U` updated, `D` deleted, `R` renamed), path, `+N`/`-N` counts:
 
 ```text
 🌲 WORKTREE 【main -> wt-http-retry】
-              carrying 2 of 5 files · 3 left in origin
-              |-- src/http.ts
-              `-- test/http.test.ts
+   └─ carrying 2 of 5 files · 3 left in origin
+      ├─ src/http.ts
+      └─ test/http.test.ts
 
-🌲 LAND 【wt-http-retry -> main】 · rebase · a1b2c3d
-       landing 2 commits
-       |-- feat(http): retry on 429
-       `-- test(http): cover retry exhaustion
-       landing 4 files
-       |-- src/http.ts
-       `-- ...
+🌲 LAND 【wt-http-retry -> main】 · rebased as a1b2c3d
+   ├─ 2 commits
+   │  ├─ feat(http): retry on 429
+   │  └─ test(http): cover retry exhaustion
+   └─ 4 files
+      ├─ U  src/http.ts          +12   -3
+      ├─ N  test/http.test.ts    +40   -0
+      ├─ U  README.md             +6   -1
+      └─ D  src/legacy-http.ts    +0  -58
 ```
 
 ## /worktree — isolate
@@ -184,7 +186,7 @@ Land straight back into the origin — zero popups. Direction is DWIM: standing 
 ```
 
 - **Strategy is asked once, remembered everywhere** (`~/.pi/agent/pi-worktree/config.json`). First `/land` asks rebase / squash / merge a single time; from then on that mode is the default and every land line shows it. An explicit `--strategy` wins for that run and becomes the new default.
-- Pending changes on both sides are checkpoint-committed first (the worktree's uses the task as its subject, the origin's is marked `wip(<branch>): checkpoint before landing …`) and shown as one trailing dim note per side (`checkpointed N files on <branch> as "<subject>"`) — auto-created commits stay visible without a second hero block. Land cards keep the commit summary and subjects separate from the file summary and paths.
+- Pending changes on both sides are checkpoint-committed first (the worktree's uses the task as its subject, the origin's is marked `wip(<branch>): checkpoint before landing …`). The origin's checkpoint is shown as a trailing `N files checkpointed on <branch>` row — auto-created commits stay visible; the worktree's own checkpoint is folded into the landed commit list it produced, so the card never repeats the same subject twice. Land cards keep the commit summary and subjects separate from the file summary and paths.
 - Empty worktrees land as cleanup: no commits and no changes means the worktree directory is removed, the branch deleted and the session unbound in the same `/land` — no second `abandon` step.
 
 ```text
@@ -229,13 +231,14 @@ Given origin `main` at `C` and worktree branch with `W1, W2`:
   merge hits conflict
         |
         v
-  +-------------------+
-  | ⚠️ LAND CONFLICT  |
-  | 【W -> main】     |
-  | conflict in N     |
-  | |-- file_a        |
-  | `-- file_b        |
-  +-------------------+
+  ⚠️ LAND CONFLICT 【W -> main】
+     └─ 2 files
+        ├─ file_a
+        └─ file_b
+        |
+        +-- model reads each file, keeps the intended result from both
+        +-- sides, `git add`, finishes the land, explains the resolution
+        +-- only asks you when both sides look deliberately contradictory
         |
         +-- model reads each file, keeps the intended result from both
         +-- sides, `git add`, finishes the land, explains the resolution
@@ -290,7 +293,7 @@ One file per link, in the shared git dir, so it survives `cd` and fresh sessions
 
 The TUI widget shows readiness at a glance: `🌲 wt-fix-login → main · fix login retry · ↑3 · ↓1 · 2 dirty` (commits ahead, origin commits behind, uncommitted files), refreshed after every agent run. Origins show their own plus unowned children.
 
-Transcript contract: every pi-worktree action renders exactly one purple block — a caps `LABEL` plus the hero in `【】`, dim detail lines aligned underneath with `|--` trees (`WORKTREE`, `LAND`, `LAND CONFLICT`, `ABANDON`, `ERROR`; conflict files stay bright). LAND cards show separate commit and file sections. No absolute paths, no green/red blocks; lists cap at 5–6 items and full output is one expand away. Cards signal state changes with the smallest effective payload — explanations and decisions belong to the model's own words.
+Transcript contract: every pi-worktree action renders exactly one purple block — a caps `LABEL` plus the hero in `【】`, rows hanging off one dim `├─`/`└─`/`│` diagram tree (`WORKTREE`, `LAND`, `LAND CONFLICT`, `ABANDON`, `ERROR`). Every row is listed — no caps — and LAND file rows are a table: status letter, path, `+N`/`-N` (additions green, deletions red, zeros dim), columns padded to the widest cell. No absolute paths, no green/red blocks; full output is one expand away. Cards signal state changes with the smallest effective payload — explanations and decisions belong to the model's own words.
 
 ## Agent tools
 

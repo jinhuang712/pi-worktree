@@ -18,11 +18,14 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  Theme,
+  ThemeColor,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Text } from "@earendil-works/pi-tui";
+import { Box, Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { rewriteToolInput, type Binding } from "./bind.ts";
+import { diagramTree, fileColumns, type DiagramRow } from "./card.ts";
 import {
   abortMerge,
   aheadBehind,
@@ -34,7 +37,7 @@ import {
   dedupePath,
   defaultWorktreePath,
   deleteBranch,
-  diffNames,
+  diffChanges,
   diffStat,
   ensureCommitted,
   getCommonDir,
@@ -56,6 +59,7 @@ import {
   unmergedFiles,
   type DiffStat,
   type ExecFn,
+  type FileChange,
   type LandStrategy,
 } from "./git.ts";
 import { buildPolicySection } from "./policy.ts";
@@ -335,9 +339,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Transcript visual language: every pi-worktree block is purple
-  // (toolPendingBg). A caps LABEL plus the hero in 【】 lead; detail lines
-  // align under the hero with dim `|--` trees for item lists (conflict files
-  // stay bright — they need action). Emoji mark the
+  // (toolPendingBg). A caps LABEL plus the hero in 【】 lead; rows hang off a
+  // dim `├─`/`└─`/`│` diagram tree (counts and names readable, conflict files
+  // brightest — they need action). Emoji mark the
   // family: 🌲 worktree ops, ⚠️ conflicts, 🗑️ abandon, ❌ errors.
   // Cards signal state changes with the smallest effective payload —
   // explanations and decisions belong to the model's own words, and full
@@ -351,7 +355,7 @@ export default function (pi: ExtensionAPI) {
 
   interface LandView {
     ok: boolean; branch: string; dest: string; strategy: string; sha: string | null;
-    ahead?: number; stat?: DiffStat; names?: string[]; subjects?: string[];
+    ahead?: number; stat?: DiffStat; names?: string[]; subjects?: string[]; changes?: FileChange[];
     checkpoints?: CheckpointInfo[]; kept?: string | null; finished?: boolean;
     conflicted?: string[]; reason?: string;
     /** True when there was nothing to merge (0 commits, clean). */
@@ -372,106 +376,146 @@ export default function (pi: ExtensionAPI) {
     return new Container();
   }
 
-  const TREE_MAX_FILES = 6;
-  const TREE_MAX_COMMITS = 5;
+  /** Cards clip by cells, not code points, so CJK subjects stop wrapping
+   *  mid-sentence on a normal terminal. */
+  const TREE_MAX_CELLS = 72;
+  const clip = (s: string) => truncateToWidth(s, TREE_MAX_CELLS, "…");
+
+  /** Status column: N new, U updated, D deleted, R renamed (git A/M/D/R). */
+  function statusLetter(status: string): string {
+    switch (status) {
+      case "A": case "C": return "N";
+      case "M": case "T": return "U";
+      case "D": return "D";
+      case "R": return "R";
+      default: return status;
+    }
+  }
+
+  function statusColor(status: string): ThemeColor {
+    switch (status) {
+      case "A": case "C": return "success";
+      case "D": return "error";
+      case "R": return "accent";
+      case "M": case "T": return "warning";
+      default: return "text";
+    }
+  }
+
+  /** File children as a table: status letter, path, `+N`, `-N` — every row
+   *  listed (no cap) and aligned, counts green/red when they move. */
+  function fileLines(changes: FileChange[] | undefined, names: string[] | undefined, ink: CardInk): string[] {
+    const list = changes ?? [];
+    if (list.length === 0) return (names ?? []).map((f) => ink.text(clip(f)));
+    const cols = fileColumns(list);
+    return list.map((c, i) => {
+      const letter = ink.fg(statusColor(c.status), statusLetter(c.status));
+      const added = ink.fg(c.added ? "toolDiffAdded" : "dim", cols[i].added);
+      const deleted = ink.fg(c.deleted ? "toolDiffRemoved" : "dim", cols[i].deleted);
+      return `${letter}  ${ink.text(cols[i].path)}  ${added}  ${deleted}`;
+    });
+  }
 
   function count(noun: string, n: number): string {
     return `${n} ${noun}${n === 1 ? "" : "s"}`;
-  }
-
-  function treeLines(items: string[], max: number, indent: string, paint?: (s: string) => string): string[] {
-    const line = (s: string) => (paint ? paint(s) : s);
-    const shown = items.slice(0, max);
-    const truncated = items.length > max;
-    const out = shown.map((f, i) => {
-      const last = !truncated && i === shown.length - 1;
-      return line(`${indent}${last ? "`--" : "|--"} ${f}`);
-    });
-    if (truncated) out.push(line(`${indent}\`-- … ${items.length - max} more`));
-    return out;
-  }
-
-  /** Spaces so continuations start under the hero: `E LABEL 【` counts
-   *  emoji 2 + spaces 1+1 + LABEL + 【 2. */
-  function heroIndent(label: string): string {
-    return " ".repeat(label.length + 6);
   }
 
   function firstLine(full: string): string {
     return full.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
   }
 
-  function worktreeText(d: { from: string; branch: string; carried: string[]; total: number; selective: boolean; clean: boolean }, ink: { hero: (s: string) => string; dim: (s: string) => string; error: (s: string) => string }): string {
-    const pad = heroIndent("WORKTREE");
+  interface CardInk {
+    hero: (s: string) => string;
+    dim: (s: string) => string;
+    error: (s: string) => string;
+    text: (s: string) => string;
+    fg: (color: ThemeColor, s: string) => string;
+  }
+
+  /** One ink palette for every card: accent hero, dim chrome, readable names. */
+  function makeInk(theme: Theme): CardInk {
+    return {
+      hero: (s: string) => theme.fg("accent", theme.bold(s)),
+      dim: (s: string) => theme.fg("dim", s),
+      error: (s: string) => theme.fg("error", s),
+      text: (s: string) => theme.fg("text", s),
+      fg: (color: ThemeColor, s: string) => theme.fg(color, s),
+    };
+  }
+
+  function worktreeText(d: { from: string; branch: string; carried: string[]; total: number; selective: boolean; clean: boolean }, ink: CardInk): string {
     const head = `🌲 WORKTREE ${ink.hero(`【${d.from} -> ${d.branch}】`)}`;
-    if (d.clean) return [head, `${pad}${ink.dim("clean · nothing to carry")}`].join("\n");
+    if (d.clean) {
+      return [head, ...diagramTree([{ head: ink.dim("clean · nothing to carry") }], ink.dim)].join("\n");
+    }
     const summary = d.carried.length === 0
       ? "nothing carried"
       : d.selective
         ? `carrying ${d.carried.length} of ${d.total} files · ${d.total - d.carried.length} left in origin`
         : `carrying ${count("file", d.carried.length)}`;
-    return [head, `${pad}${ink.dim(summary)}`, ...treeLines(d.carried, TREE_MAX_FILES, pad, ink.dim)].join("\n");
+    const rows: DiagramRow[] = [{ head: ink.dim(summary), children: d.carried.map((f) => ink.text(clip(f))) }];
+    return [head, ...diagramTree(rows, ink.dim)].join("\n");
   }
 
-  function landText(d: LandView, ink: { hero: (s: string) => string; dim: (s: string) => string; error: (s: string) => string }, full: string): string {
+  /** `3 commits` — the count is the signal, the noun is chrome. */
+  function treeHead(n: number, noun: string, ink: CardInk): string {
+    return `${ink.text(String(n))} ${ink.dim(n === 1 ? noun : `${noun}s`)}`;
+  }
+
+  /** `rebase · 517fce9` left both tokens dangling — a verb says what happened
+   *  and `as <sha>` names the commit the target now points at. */
+  function landMeta(d: LandView): string {
+    const verb = d.strategy === "squash" ? "squashed" : d.strategy === "merge" ? "merged" : "rebased";
+    return d.sha ? `${verb} as ${shortSha(d.sha)}` : verb;
+  }
+
+  function landText(d: LandView, ink: CardInk, full: string): string {
     const hero = ink.hero(`【${d.branch} -> ${d.dest}】`);
     if (!d.ok && d.reason === "conflict") {
       const files = d.conflicted ?? [];
-      const pad = heroIndent("LAND CONFLICT");
-      return [
-        `⚠️ LAND CONFLICT ${hero}`,
-        `${pad}${ink.dim(`conflict in ${count("file", files.length)}`)}`,
-        ...treeLines(files, TREE_MAX_FILES, pad),
-      ].join("\n");
+      const rows: DiagramRow[] = [{ head: ink.dim(count("file", files.length)), children: files.map((f) => clip(f)) }];
+      return [`⚠️ LAND CONFLICT ${hero}`, ...diagramTree(rows, ink.dim)].join("\n");
     }
     if (!d.ok && d.reason === "nothing-to-land") {
-      return [`🌲 LAND ${hero}`, `${heroIndent("LAND")}${ink.dim("nothing new · nothing to clean")}`].join("\n");
+      return [`🌲 LAND ${hero}`, ...diagramTree([{ head: ink.dim("nothing new · nothing to clean") }], ink.dim)].join("\n");
     }
     if (!d.ok) return ink.error(`❌ ${firstLine(full)}`);
     if (d.empty) {
-      const pad = heroIndent("LAND");
       const note = d.cleaned ? "nothing new · cleaned up" : "nothing new";
-      return [`🌲 LAND ${hero} ${ink.dim(`· ${note}`)}`].join("\n");
+      return `🌲 LAND ${hero} ${ink.dim(`· ${note}`)}`;
     }
-    const pad = heroIndent("LAND");
-    const meta = [d.strategy, d.sha ? shortSha(d.sha) : ""].filter(Boolean).join(" · ");
-    const lines = [`🌲 LAND ${hero}${meta ? ` ${ink.dim(`· ${meta}`)}` : ""}`];
-    if (d.finished) lines.push(`${pad}${ink.dim("merge concluded")}`);
-    // Keep commits and files as separate sections so the two lists cannot be
-    // mistaken for one another. Trees are dim footnotes under their labels.
+    const meta = landMeta(d);
+    const rows: DiagramRow[] = [];
+    if (d.finished) rows.push({ head: ink.dim("merge concluded") });
     if (d.ahead !== undefined) {
-      lines.push(`${pad}${ink.dim(`landing ${count("commit", d.ahead)}`)}`);
-      lines.push(...treeLines(d.subjects ?? [], TREE_MAX_COMMITS, pad, ink.dim));
+      rows.push({ head: treeHead(d.ahead, "commit", ink), children: (d.subjects ?? []).map((s) => ink.text(clip(s))) });
     }
     if (d.stat) {
-      lines.push(`${pad}${ink.dim(`landing ${count("file", d.stat.files)}`)}`);
-      lines.push(...treeLines(d.names ?? [], TREE_MAX_FILES, pad, ink.dim));
+      rows.push({ head: treeHead(d.stat.files, "file", ink), children: fileLines(d.changes, d.names, ink) });
     }
-    // Checkpoints fold into trailing dim notes — no second hero header, no
-    // file tree. The file list already appears in the landed names below,
-    // but the checkpoint subject (the auto-commit message) is kept.
-    for (const c of d.checkpoints ?? []) {
-      lines.push(`${pad}${ink.dim(`checkpointed ${count("file", c.paths.length)} on ${c.branch} as "${truncateMiddle(c.subject, 48)}"`)}`);
+    // The source checkpoint is redundant here: its files are the landed files
+    // and its subject is the land message already listed above. Only the
+    // origin's own checkpoint is news.
+    for (const c of (d.checkpoints ?? []).filter((c) => c.side !== "source")) {
+      rows.push({ head: ink.dim(`${count("file", c.paths.length)} checkpointed on ${c.branch}`) });
     }
-    if (d.kept) lines.push(`${pad}${ink.dim(d.kept)}`);
-    return lines.join("\n");
+    if (d.kept) rows.push({ head: ink.dim(clip(d.kept)) });
+    return [`🌲 LAND ${hero}${meta ? ` ${ink.dim(`· ${meta}`)}` : ""}`, ...diagramTree(rows, ink.dim)].join("\n");
   }
 
-  function abandonText(d: { branch: string; commits: number; dirty: number }, ink: { hero: (s: string) => string; dim: (s: string) => string; error: (s: string) => string }): string {
+  function abandonText(d: { branch: string; commits: number; dirty: number }, ink: CardInk): string {
     const bits: string[] = [];
     if (d.commits) bits.push(count("commit", d.commits));
     if (d.dirty) bits.push(count("dirty file", d.dirty));
-    return [`🗑️ ABANDON ${ink.hero(`【${d.branch}】`)}`, `${heroIndent("ABANDON")}${ink.dim(bits.length ? `${bits.join(" · ")} discarded` : "nothing discarded")}`].join("\n");
+    const note = bits.length ? `${bits.join(" · ")} discarded` : "nothing discarded";
+    return [`🗑️ ABANDON ${ink.hero(`【${d.branch}】`)}`, ...diagramTree([{ head: ink.dim(note) }], ink.dim)].join("\n");
   }
+
 
   pi.registerMessageRenderer(CARD_TYPE, (message, opts, theme) => {
     const full = typeof message.content === "string" ? message.content : "";
     const d = message.details as CardDetails | undefined;
-    const ink = {
-      hero: (s: string) => theme.fg("accent", theme.bold(s)),
-      dim: (s: string) => theme.fg("dim", s),
-      error: (s: string) => theme.fg("error", s),
-    };
+    const ink = makeInk(theme);
     const block = (text: string) => {
       const box = new Box(opts.outputPad, 1, (t: string) => theme.bg("toolPendingBg", t));
       box.addChild(new Text(text, 0, 0));
@@ -962,15 +1006,15 @@ export default function (pi: ExtensionAPI) {
       checkpoints.push({ branch: targetBranch ?? "origin", side: "target", paths: porcelainPaths(tgtStatus.porcelain), subject });
     }
 
-    // Post-checkpoint truth: what actually lands (subjects/names/counts).
+    // Post-checkpoint truth: what actually lands (subjects/changes/counts).
     const landed = targetBranch
       ? {
         ahead: (await aheadBehind(exec, sourcePath, targetBranch, "HEAD")).ahead,
         stat: await diffStat(exec, sourcePath, targetBranch, "HEAD"),
         subjects: await commitSubjects(exec, sourcePath, targetBranch, "HEAD"),
-        names: await diffNames(exec, sourcePath, targetBranch, "HEAD"),
+        changes: await diffChanges(exec, sourcePath, targetBranch, "HEAD"),
       }
-      : { ahead: 0, stat: { files: 0, insertions: 0, deletions: 0 }, subjects: [] as string[], names: [] as string[] };
+      : { ahead: 0, stat: { files: 0, insertions: 0, deletions: 0 }, subjects: [] as string[], changes: [] as FileChange[] };
 
     const merged = await mergeInto(exec, targetPath, sourceBranch, strategy, message, undefined, sourcePath, targetBranch ?? null);
     if (!merged.ok) {
@@ -1013,7 +1057,7 @@ export default function (pi: ExtensionAPI) {
       details: {
         ok: true, sha, target: targetPath, source: sourcePath, strategy: label,
         note: merged.note, cleanup, targetCheckpoint, branch: sourceBranch, dest: targetBranch,
-        ahead: landed.ahead, stat: landed.stat, names: landed.names, subjects: landed.subjects,
+        ahead: landed.ahead, stat: landed.stat, changes: landed.changes, names: landed.changes.map((c) => c.path), subjects: landed.subjects,
         checkpoints, kept, foreign: foreign.map((l) => l.branch),
       },
       link: link ?? undefined,
@@ -1218,11 +1262,7 @@ export default function (pi: ExtensionAPI) {
     renderShell: "self",
     renderCall: silentRender,
     renderResult(result, { expanded, isPartial }, theme) {
-      const ink = {
-        hero: (s: string) => theme.fg("accent", theme.bold(s)),
-        dim: (s: string) => theme.fg("dim", s),
-        error: (s: string) => theme.fg("error", s),
-      };
+      const ink = makeInk(theme);
       const box = (text: string) => {
         const b = new Box(1, 1, (t: string) => theme.bg("toolPendingBg", t));
         b.addChild(new Text(text, 0, 0));
@@ -1283,11 +1323,7 @@ export default function (pi: ExtensionAPI) {
     renderShell: "self",
     renderCall: silentRender,
     renderResult(result, { expanded, isPartial }, theme) {
-      const ink = {
-        hero: (s: string) => theme.fg("accent", theme.bold(s)),
-        dim: (s: string) => theme.fg("dim", s),
-        error: (s: string) => theme.fg("error", s),
-      };
+      const ink = makeInk(theme);
       const box = (text: string) => {
         const b = new Box(1, 1, (t: string) => theme.bg("toolPendingBg", t));
         b.addChild(new Text(text, 0, 0));
@@ -1307,6 +1343,7 @@ export default function (pi: ExtensionAPI) {
         stat: (d.stat ?? undefined) as DiffStat | undefined,
         names: Array.isArray(d.names) ? d.names.map(String) : undefined,
         subjects: Array.isArray(d.subjects) ? d.subjects.map(String) : undefined,
+        changes: Array.isArray(d.changes) ? d.changes as FileChange[] : undefined,
         checkpoints: Array.isArray(d.checkpoints) ? d.checkpoints as CheckpointInfo[] : undefined,
         kept: typeof d.kept === "string" ? d.kept : undefined,
         finished: d.finished === true ? true : undefined,
@@ -1337,11 +1374,7 @@ export default function (pi: ExtensionAPI) {
     renderShell: "self",
     renderCall: silentRender,
     renderResult(result, { expanded, isPartial }, theme) {
-      const ink = {
-        hero: (s: string) => theme.fg("accent", theme.bold(s)),
-        dim: (s: string) => theme.fg("dim", s),
-        error: (s: string) => theme.fg("error", s),
-      };
+      const ink = makeInk(theme);
       const box = (text: string) => {
         const b = new Box(1, 1, (t: string) => theme.bg("toolPendingBg", t));
         b.addChild(new Text(text, 0, 0));
@@ -1533,7 +1566,7 @@ export default function (pi: ExtensionAPI) {
       const rd = result.details as {
         ok?: boolean; reason?: string; sha?: string | null; strategy?: string;
         branch?: string | null; dest?: string; source?: string; target?: string;
-        ahead?: number; stat?: DiffStat; names?: string[]; subjects?: string[];
+        ahead?: number; stat?: DiffStat; names?: string[]; subjects?: string[]; changes?: FileChange[];
         checkpoints?: CheckpointInfo[]; kept?: string | null; finished?: boolean;
         conflicted?: string[]; empty?: boolean; cleaned?: boolean;
       };
@@ -1580,7 +1613,7 @@ export default function (pi: ExtensionAPI) {
               kind: "land", ok: true,
               branch: rd.branch ?? "?", dest: rd.dest ?? "?",
               strategy: rd.strategy ?? DEFAULT_STRATEGY, sha: rd.sha ?? null,
-              ahead: rd.ahead, stat: rd.stat, names: rd.names, subjects: rd.subjects,
+              ahead: rd.ahead, stat: rd.stat, changes: rd.changes, names: rd.names, subjects: rd.subjects,
               checkpoints: rd.checkpoints, kept: rd.kept ?? null, finished: rd.finished,
               empty: rd.empty, cleaned: rd.cleaned,
             } satisfies CardDetails,

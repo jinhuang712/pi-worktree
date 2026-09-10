@@ -538,8 +538,45 @@ export async function diffNames(exec: ExecFn, cwd: string, base: string, head: s
   return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
 }
 
+export interface FileChange {
+  /** Raw git status letter: A, M, D, R, C, T. */
+  status: string;
+  /** The new path (for renames/copies: where the file ended up). */
+  path: string;
+  /** Original path for renames/copies. */
+  from?: string;
+  /** Lines added/deleted; both null when git reports `-` (binary file). */
+  added: number | null;
+  deleted: number | null;
+}
+
+/** Per-file change rows for `head` vs `base` — status letter plus line counts
+ *  (same three-dot range as diffStat/diffNames). */
+export async function diffChanges(exec: ExecFn, cwd: string, base: string, head: string): Promise<FileChange[]> {
+  const range = `${base}...${head}`;
+  const [name, num] = await Promise.all([
+    run(exec, ["diff", "--name-status", range], cwd),
+    run(exec, ["diff", "--numstat", range], cwd),
+  ]);
+  if (name.code !== 0) return [];
+  const counts = num.code === 0 ? num.stdout.split("\n").filter(Boolean) : [];
+  return name.stdout.split("\n").filter(Boolean).map((line, i) => {
+    const cols = line.split("\t");
+    const status = (cols[0] ?? "?").charAt(0).toUpperCase();
+    const renamed = status === "R" || status === "C";
+    const [a, d] = (counts[i] ?? "").split("\t");
+    return {
+      status,
+      path: ((renamed ? cols[2] : cols[1]) ?? "").trim(),
+      from: renamed ? cols[1] : undefined,
+      added: a !== undefined && /^\d+$/.test(a) ? Number(a) : null,
+      deleted: d !== undefined && /^\d+$/.test(d) ? Number(d) : null,
+    };
+  });
+}
+
 /** Subject lines of commits in `head` not in `base`, newest first. */
-export async function commitSubjects(exec: ExecFn, cwd: string, base: string, head: string, max = 20): Promise<string[]> {
+export async function commitSubjects(exec: ExecFn, cwd: string, base: string, head: string, max = 200): Promise<string[]> {
   const r = await run(exec, ["log", "--format=%s", `-n${max}`, `${base}..${head}`], cwd);
   if (r.code !== 0) return [];
   return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
