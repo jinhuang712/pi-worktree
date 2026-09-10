@@ -4,6 +4,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  isDetached,
+  isWorkTree,
   parseShortstat,
   parseWorktreePorcelain,
   porcelainPaths,
@@ -80,6 +82,20 @@ test("task text names the branch when it has ASCII words", () => {
   assert.equal(suggestBranchName("main", "Fix the login retry bug", d), "wt-fix-login-retry");
   assert.equal(suggestBranchName("feat-x", "Fix the login retry bug", d), "wt-feat-x-fix-login-retry");
   assert.equal(suggestBranchName("main", "先补充测试用例", d), "wt-0904-1030");
+});
+
+test("isDetached trusts only exit 1; git failures are not detachment", async () => {
+  const at = (code: number, stdout = ""): ExecFn => async () => ({ stdout, stderr: "", code });
+  assert.equal(await isDetached(at(0, "refs/heads/main\n"), "/repo"), false);
+  assert.equal(await isDetached(at(1), "/repo"), true);
+  assert.equal(await isDetached(at(128), "/repo/然后推送到"), false);
+});
+
+test("isWorkTree accepts worktrees, rejects missing paths and bare repos", async () => {
+  const exec = (stdout: string, code = 0): ExecFn => async () => ({ stdout, stderr: "", code });
+  assert.equal(await isWorkTree(exec("true\n"), "/repo"), true);
+  assert.equal(await isWorkTree(exec("false\n"), "/repo.git"), false);
+  assert.equal(await isWorkTree(exec("fatal: not a git repository\n", 128), "/repo/然后推送到"), false);
 });
 
 test("parses diff --shortstat", () => {

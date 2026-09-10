@@ -42,6 +42,7 @@ import {
   getTopLevel,
   hasMergeHead,
   isDetached,
+  isWorkTree,
   listWorktrees,
   mergeInto,
   porcelainPaths,
@@ -790,6 +791,15 @@ export default function (pi: ExtensionAPI) {
       return {
         text: "Source HEAD is detached — create a branch first (`git switch -c <name>`) so /land knows what to merge.",
         details: { ok: false, reason: "detached-source" },
+      };
+    }
+    // Validate before diagnosing: a path that does not exist (or is not a
+    // repo) makes every git probe fail, and those failures are not a HEAD
+    // state. Without this, `git symbolic-ref` exit 128 reads as "detached".
+    if (!(await isWorkTree(exec, targetPath))) {
+      return {
+        text: `Target ${targetPath} is not a git work tree — no such directory, or not a repository. Check the path (a branch name or a bare /land avoids naming a path at all).`,
+        details: { ok: false, reason: "bad-target", target: targetPath },
       };
     }
     if (await isDetached(exec, targetPath)) {

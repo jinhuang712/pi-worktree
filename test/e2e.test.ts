@@ -10,6 +10,8 @@ import {
   createWorktree,
   diffNames,
   ensureCommitted,
+  isDetached,
+  isWorkTree,
   listWorktrees,
   mergeInto,
   type ExecFn,
@@ -39,6 +41,18 @@ async function initRepo(): Promise<string> {
   await sh(dir, ["commit", "-m", "init"]);
   return dir;
 }
+
+test("a bogus target path is not a worktree and not detached", async () => {
+  const origin = await initRepo();
+  // The exact shape of the reported bug: origin path with text glued on.
+  const bogus = join(origin, "然后推送到");
+  assert.equal(await isWorkTree(exec, bogus), false);
+  assert.equal(await isDetached(exec, bogus), false);
+  // And a genuinely detached worktree still reads as detached.
+  await sh(origin, ["checkout", "--detach", "HEAD"]);
+  assert.equal(await isWorkTree(exec, origin), true);
+  assert.equal(await isDetached(exec, origin), true);
+});
 
 test("create + stash-carry + land clean merge", async () => {
   const origin = await initRepo();

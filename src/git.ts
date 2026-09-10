@@ -472,9 +472,20 @@ export interface LandMergeResult {
   note?: string;
 }
 
+/** True when `dir` exists and is inside a git work tree (a normal checkout or
+ *  a linked worktree). Bare repos and nonexistent paths are false. */
+export async function isWorkTree(exec: ExecFn, dir: string): Promise<boolean> {
+  const r = await run(exec, ["rev-parse", "--is-inside-work-tree"], dir);
+  return r.code === 0 && r.stdout.trim() === "true";
+}
+
+/** True only when HEAD is genuinely detached: `symbolic-ref -q HEAD` exits 1
+ *  for a detached HEAD. Any other failure (128 = no such directory / not a
+ *  repository, aborted exec, ...) says nothing about HEAD and must not be
+ *  reported as detachment — validate the path with isWorkTree first. */
 export async function isDetached(exec: ExecFn, cwd: string): Promise<boolean> {
   const r = await run(exec, ["symbolic-ref", "-q", "HEAD"], cwd);
-  return r.code !== 0;
+  return r.code === 1;
 }
 
 /** Commits in `head` not in `base` (ahead) and vice versa (behind). */

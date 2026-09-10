@@ -26,6 +26,7 @@ All notable changes to `pi-worktree` are documented here.
 
 ### Fixed
 
+- **A bad `/land` target is no longer misreported as detached HEAD.** When the target path does not exist (e.g. `/land /repo/然后推送到` — text glued to the path), every git probe fails and `git symbolic-ref` exits 128; that exit code used to be read as "detached HEAD", sending the session hunting for a fix in a target that was never checked out. `isDetached` now trusts only exit 1, and land validates the target with `rev-parse --is-inside-work-tree` first, reporting `Target … is not a git work tree — no such directory, or not a repository` (`bad-target`).
 - **Stash leak:** `git stash drop` only accepts `stash@{n}` refs, never a raw sha — every carry used to leave an orphan `pi-worktree:*` stash entry. Now locates the entry by sha and drops it; tests assert an empty stash list after carry.
 
 ## [0.2.0] - 2026-09-04
