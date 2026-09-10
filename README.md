@@ -293,7 +293,7 @@ One file per link, in the shared git dir, so it survives `cd` and fresh sessions
 
 The TUI widget shows readiness at a glance: `🌲 wt-fix-login → main · fix login retry · ↑3 · ↓1 · 2 dirty` (commits ahead, origin commits behind, uncommitted files), refreshed after every agent run. Origins show their own plus unowned children.
 
-Transcript contract: every pi-worktree action renders exactly one purple block — a caps `LABEL` plus the hero in `【】`, rows hanging off one dim `├─`/`└─`/`│` diagram tree (`WORKTREE`, `LAND`, `LAND CONFLICT`, `ABANDON`, `ERROR`). Every row is listed — no caps — and file rows (both `WORKTREE` and `LAND`) are a table: status letter, path, `+N`/`-N` (additions green, deletions red, zeros dim), columns padded to the widest cell. No absolute paths, no green/red blocks; full output is one expand away. Cards signal state changes with the smallest effective payload — explanations and decisions belong to the model's own words.
+Transcript contract: every pi-worktree action renders exactly one purple block — a caps `LABEL` plus the hero in `【】`, rows hanging off one dim `├─`/`└─`/`│` diagram tree (`WORKTREE`, `LAND`, `LAND CONFLICT`, `ABANDON`, `ERROR`). Every row is listed — no caps — and file rows (both `WORKTREE` and `LAND`) are a table: status letter, path, `+N`/`-N` (additions green, deletions red, zeros dim), columns padded to the widest cell. Cards render against the real terminal width: long commit subjects wrap onto the next line, hanging under their text instead of being clipped. No absolute paths, no green/red blocks; full output is one expand away. Cards signal state changes with the smallest effective payload — explanations and decisions belong to the model's own words.
 
 ## Agent tools
 

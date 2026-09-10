@@ -21,7 +21,7 @@ import type {
   Theme,
   ThemeColor,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Box, Container, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { rewriteToolInput, type Binding } from "./bind.ts";
@@ -382,6 +382,36 @@ export default function (pi: ExtensionAPI) {
   const TREE_MAX_CELLS = 72;
   const clip = (s: string) => truncateToWidth(s, TREE_MAX_CELLS, "…");
 
+  /** Cells a diagram child line spends before its text: indent 3 + stem 3 +
+   *  glyph 2 + space 1. Wrapped continuations line up under the text. */
+  const CARD_CHILD_CELLS = 9;
+
+  /** One child, wrapped to the cells left on the card — nothing is hidden,
+   *  long subjects continue on the next line instead. */
+  function wrapChild(text: string, width: number): string[] {
+    const budget = Math.max(16, width - CARD_CHILD_CELLS);
+    return visibleWidth(text) <= budget ? [text] : wrapTextWithAnsi(text, budget);
+  }
+
+  /** The purple card shell. `build` gets the width the content may use, so
+   *  cards wrap to the real terminal instead of a guessed budget. */
+  function cardBox(paddingX: number, bg: (s: string) => string, build: (width: number) => string): Component {
+    const box = new Box(paddingX, 1, bg);
+    box.addChild({
+      render: (width: number): string[] => {
+        const out: string[] = [];
+        for (const line of build(width).split("\n")) {
+          if (visibleWidth(line) <= width) out.push(line);
+          // Last resort for lines the builders could not wrap themselves.
+          else out.push(...wrapTextWithAnsi(line, width));
+        }
+        return out;
+      },
+      invalidate: (): void => {},
+    });
+    return box;
+  }
+
   /** Status column: N new, U updated, D deleted, R renamed (git A/M/D/R). */
   function statusLetter(status: string): string {
     switch (status) {
@@ -404,11 +434,13 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** File children as a table: status letter, path, `+N`, `-N` — every row
-   *  listed (no cap) and aligned, counts green/red when they move. */
-  function fileLines(changes: FileChange[] | undefined, names: string[] | undefined, ink: CardInk): string[] {
+   *  listed (no cap) and aligned, counts green/red when they move. The path
+   *  column shrinks to the card so the counts never wrap. */
+  function fileLines(changes: FileChange[] | undefined, names: string[] | undefined, ink: CardInk, width: number): string[] {
     const list = changes ?? [];
     if (list.length === 0) return (names ?? []).map((f) => ink.text(clip(f)));
-    const cols = fileColumns(list);
+    const pathMax = Math.max(16, Math.min(56, width - CARD_CHILD_CELLS - 15));
+    const cols = fileColumns(list, pathMax);
     return list.map((c, i) => {
       const letter = ink.fg(statusColor(c.status), statusLetter(c.status));
       const added = ink.fg(c.added ? "toolDiffAdded" : "dim", cols[i].added);
@@ -444,7 +476,7 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  function worktreeText(d: { from: string; branch: string; carried: string[]; total: number; selective: boolean; clean: boolean; changes?: FileChange[] }, ink: CardInk): string {
+  function worktreeText(d: { from: string; branch: string; carried: string[]; total: number; selective: boolean; clean: boolean; changes?: FileChange[] }, ink: CardInk, width: number): string {
     const head = `🌲 WORKTREE ${ink.hero(`【${d.from} -> ${d.branch}】`)}`;
     if (d.clean) {
       return [head, ...diagramTree([{ head: ink.dim("clean · nothing to carry") }], ink.dim)].join("\n");
@@ -454,7 +486,7 @@ export default function (pi: ExtensionAPI) {
       : d.selective
         ? `carrying ${d.carried.length} of ${d.total} files · ${d.total - d.carried.length} left in origin`
         : `carrying ${count("file", d.carried.length)}`;
-    const rows: DiagramRow[] = [{ head: ink.dim(summary), children: fileLines(d.changes, d.carried, ink) }];
+    const rows: DiagramRow[] = [{ head: ink.dim(summary), children: fileLines(d.changes, d.carried, ink, width) }];
     return [head, ...diagramTree(rows, ink.dim)].join("\n");
   }
 
@@ -470,7 +502,7 @@ export default function (pi: ExtensionAPI) {
     return d.sha ? `${verb} as ${shortSha(d.sha)}` : verb;
   }
 
-  function landText(d: LandView, ink: CardInk, full: string): string {
+  function landText(d: LandView, ink: CardInk, full: string, width: number): string {
     const hero = ink.hero(`【${d.branch} -> ${d.dest}】`);
     if (!d.ok && d.reason === "conflict") {
       const files = d.conflicted ?? [];
@@ -489,10 +521,10 @@ export default function (pi: ExtensionAPI) {
     const rows: DiagramRow[] = [];
     if (d.finished) rows.push({ head: ink.dim("merge concluded") });
     if (d.ahead !== undefined) {
-      rows.push({ head: treeHead(d.ahead, "commit", ink), children: (d.subjects ?? []).map((s) => ink.text(clip(s))) });
+      rows.push({ head: treeHead(d.ahead, "commit", ink), children: (d.subjects ?? []).map((s) => wrapChild(ink.text(s), width)) });
     }
     if (d.stat) {
-      rows.push({ head: treeHead(d.stat.files, "file", ink), children: fileLines(d.changes, d.names, ink) });
+      rows.push({ head: treeHead(d.stat.files, "file", ink), children: fileLines(d.changes, d.names, ink, width) });
     }
     // The source checkpoint is redundant here: its files are the landed files
     // and its subject is the land message already listed above. Only the
@@ -504,7 +536,7 @@ export default function (pi: ExtensionAPI) {
     return [`🌲 LAND ${hero}${meta ? ` ${ink.dim(`· ${meta}`)}` : ""}`, ...diagramTree(rows, ink.dim)].join("\n");
   }
 
-  function abandonText(d: { branch: string; commits: number; dirty: number }, ink: CardInk): string {
+  function abandonText(d: { branch: string; commits: number; dirty: number }, ink: CardInk, _width: number): string {
     const bits: string[] = [];
     if (d.commits) bits.push(count("commit", d.commits));
     if (d.dirty) bits.push(count("dirty file", d.dirty));
@@ -517,17 +549,14 @@ export default function (pi: ExtensionAPI) {
     const full = typeof message.content === "string" ? message.content : "";
     const d = message.details as CardDetails | undefined;
     const ink = makeInk(theme);
-    const block = (text: string) => {
-      const box = new Box(opts.outputPad, 1, (t: string) => theme.bg("toolPendingBg", t));
-      box.addChild(new Text(text, 0, 0));
-      return box;
-    };
+    const block = (build: string | ((width: number) => string)) =>
+      cardBox(opts.outputPad, (t: string) => theme.bg("toolPendingBg", t), typeof build === "function" ? build : () => build);
     if (opts.expanded || !d) return block(full);
-    if (d.kind === "create") return block(worktreeText(d, ink));
-    if (d.kind === "land") return block(landText(d, ink, full));
+    if (d.kind === "create") return block((w) => worktreeText(d, ink, w));
+    if (d.kind === "land") return block((w) => landText(d, ink, full, w));
     if (d.kind === "abandon") {
       if (!d.ok) return block(ink.error(`❌ ${firstLine(full)}`));
-      return block(abandonText(d, ink));
+      return block((w) => abandonText(d, ink, w));
     }
     return block(ink.error(`❌ ${firstLine(full)}`));
   });
@@ -1273,17 +1302,14 @@ export default function (pi: ExtensionAPI) {
     renderCall: silentRender,
     renderResult(result, { expanded, isPartial }, theme) {
       const ink = makeInk(theme);
-      const box = (text: string) => {
-        const b = new Box(1, 1, (t: string) => theme.bg("toolPendingBg", t));
-        b.addChild(new Text(text, 0, 0));
-        return b;
-      };
+      const box = (build: string | ((width: number) => string)) =>
+        cardBox(1, (t: string) => theme.bg("toolPendingBg", t), typeof build === "function" ? build : () => build);
       if (isPartial) return box(ink.dim("…"));
       const full = (result as { content?: Array<{ text?: unknown }> }).content?.map((b) => (typeof b?.text === "string" ? b.text : "")).filter(Boolean).join("\n") ?? "";
       if (expanded) return box(full);
       const d = (result as { details?: { ok?: unknown; from?: unknown; branch?: unknown; carried?: unknown; total?: unknown; selective?: unknown; clean?: unknown; changes?: unknown } }).details ?? {};
       if (d.ok !== true) return box(ink.error(`❌ ${firstLine(full)}`));
-      return box(worktreeText({
+      return box((w) => worktreeText({
         from: typeof d.from === "string" ? d.from : "?",
         branch: typeof d.branch === "string" ? d.branch : "?",
         carried: Array.isArray(d.carried) ? d.carried.map(String) : [],
@@ -1291,7 +1317,7 @@ export default function (pi: ExtensionAPI) {
         selective: d.selective === true,
         clean: d.clean === true,
         changes: Array.isArray(d.changes) ? d.changes as FileChange[] : undefined,
-      }, ink));
+      }, ink, w));
     },
   });
 
@@ -1335,16 +1361,13 @@ export default function (pi: ExtensionAPI) {
     renderCall: silentRender,
     renderResult(result, { expanded, isPartial }, theme) {
       const ink = makeInk(theme);
-      const box = (text: string) => {
-        const b = new Box(1, 1, (t: string) => theme.bg("toolPendingBg", t));
-        b.addChild(new Text(text, 0, 0));
-        return b;
-      };
+      const box = (build: string | ((width: number) => string)) =>
+        cardBox(1, (t: string) => theme.bg("toolPendingBg", t), typeof build === "function" ? build : () => build);
       if (isPartial) return box(ink.dim("…"));
       const full = (result as { content?: Array<{ text?: unknown }> }).content?.map((b) => (typeof b?.text === "string" ? b.text : "")).filter(Boolean).join("\n") ?? "";
       if (expanded) return box(full);
       const d = (result as { details?: Record<string, unknown> }).details ?? {};
-      return box(landText({
+      return box((w) => landText({
         ok: d.ok === true,
         branch: typeof d.branch === "string" ? d.branch : "?",
         dest: typeof d.dest === "string" ? d.dest : "?",
@@ -1362,7 +1385,7 @@ export default function (pi: ExtensionAPI) {
         reason: typeof d.reason === "string" ? d.reason : undefined,
         empty: d.empty === true ? true : undefined,
         cleaned: d.cleaned === true ? true : undefined,
-      }, ink, full));
+      }, ink, full, w));
     },
   });
 
@@ -1386,11 +1409,8 @@ export default function (pi: ExtensionAPI) {
     renderCall: silentRender,
     renderResult(result, { expanded, isPartial }, theme) {
       const ink = makeInk(theme);
-      const box = (text: string) => {
-        const b = new Box(1, 1, (t: string) => theme.bg("toolPendingBg", t));
-        b.addChild(new Text(text, 0, 0));
-        return b;
-      };
+      const box = (build: string | ((width: number) => string)) =>
+        cardBox(1, (t: string) => theme.bg("toolPendingBg", t), typeof build === "function" ? build : () => build);
       if (isPartial) return box(ink.dim("…"));
       const full = (result as { content?: Array<{ text?: unknown }> }).content?.map((b) => (typeof b?.text === "string" ? b.text : "")).filter(Boolean).join("\n") ?? "";
       if (expanded) return box(full);
@@ -1399,11 +1419,11 @@ export default function (pi: ExtensionAPI) {
         const head = firstLine(full);
         return box(d.reason === "needs-confirm" ? head : ink.error(`❌ ${head}`));
       }
-      return box(abandonText({
+      return box((w) => abandonText({
         branch: typeof d.branch === "string" ? d.branch : "?",
         commits: typeof d.commits === "number" ? d.commits : 0,
         dirty: typeof d.dirty === "number" ? d.dirty : 0,
-      }, ink));
+      }, ink, w));
     },
   });
 

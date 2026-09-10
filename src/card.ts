@@ -1,4 +1,4 @@
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { wrapTextWithAnsi, visibleWidth } from "@earendil-works/pi-tui";
 
 /**
  * Diagram-tree layout shared by every pi-worktree card.
@@ -10,11 +10,15 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
  * recedes, data leads.
  */
 
+/** A child entry: one painted line, or several wrapped lines (the extra lines
+ *  hang under the text, keeping the diagram aligned). */
+export type DiagramChild = string | string[];
+
 export interface DiagramRow {
   /** Painted row label, e.g. `3 commits` — numbers bright, noun dim. */
   head: string;
-  /** Painted child lines, one per item. */
-  children?: string[];
+  /** Painted child lines, one entry per item. */
+  children?: DiagramChild[];
 }
 
 /** The diagram hangs this far in from the hero line. */
@@ -31,9 +35,15 @@ export function diagramTree(
     const lastRow = i === rows.length - 1;
     out.push(`${indent}${paintGlyph(lastRow ? "└─" : "├─")} ${row.head}`);
     const children = row.children ?? [];
-    const stem = `${indent}${lastRow ? "   " : "│  "}`;
+    const stem = `${indent}${lastRow ? "   " : `${paintGlyph("│")}  `}`;
     children.forEach((child, j) => {
-      out.push(`${stem}${paintGlyph(j === children.length - 1 ? "└─" : "├─")} ${child}`);
+      const glyph = j === children.length - 1 ? "└─" : "├─";
+      const parts = Array.isArray(child) ? child : [child];
+      parts.forEach((part, k) => {
+        // Continuations drop the glyph but keep the width (2 + 1 space), so
+        // wrapped text starts under the first line instead of under the stem.
+        out.push(`${stem}${k === 0 ? `${paintGlyph(glyph)} ` : "   "}${part}`);
+      });
     });
   });
   return out;
@@ -52,7 +62,9 @@ export function clipPath(path: string, max: number): string {
     segs.pop();
   }
   const out = `…/${tail}`;
-  return visibleWidth(out) <= max ? out : `…/${truncateToWidth(tail, Math.max(1, max - 2), "…")}`;
+  if (visibleWidth(out) <= max) return out;
+  const hard = wrapTextWithAnsi(tail, Math.max(1, max - 2));
+  return `…/${hard[0] ?? ""}`;
 }
 
 /** One row of a file list: path plus its line counts (null = binary). */

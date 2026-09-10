@@ -31,6 +31,21 @@ test("the last row and last child drop their continuation", () => {
   ]);
 });
 
+test("wrapped children hang under the text, not under the stem", () => {
+  assert.deepEqual(diagramTree([{ head: "1 commit", children: [["first line", "second line"]] }], plain), [
+    "   └─ 1 commit",
+    "      └─ first line",
+    "         second line",
+  ]);
+});
+
+test("the │ stem is painted with the glyph painter", () => {
+  const seen: string[] = [];
+  const paint = (s: string) => { seen.push(s); return s; };
+  diagramTree([{ head: "1 commit", children: ["x"] }, { head: "2 files" }], paint);
+  assert.deepEqual(seen, ["├─", "│", "└─", "└─"]);
+});
+
 test("file columns align paths, +N and -N", () => {
   const cols = fileColumns([
     { path: "CHANGELOG.md", added: 1, deleted: 0 },
