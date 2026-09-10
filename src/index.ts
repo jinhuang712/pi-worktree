@@ -57,6 +57,7 @@ import {
   suggestBranchName,
   syncStoreWithGit,
   unmergedFiles,
+  workingChanges,
   type DiffStat,
   type ExecFn,
   type FileChange,
@@ -365,7 +366,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   type CardDetails =
-    | { kind: "create"; from: string; branch: string; carried: string[]; total: number; selective: boolean; clean: boolean }
+    | { kind: "create"; from: string; branch: string; carried: string[]; total: number; selective: boolean; clean: boolean; changes?: FileChange[] }
     | ({ kind: "land" } & LandView)
     | { kind: "abandon"; ok: boolean; branch: string; commits: number; dirty: number; reason?: string }
     | { kind: "error" };
@@ -443,7 +444,7 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  function worktreeText(d: { from: string; branch: string; carried: string[]; total: number; selective: boolean; clean: boolean }, ink: CardInk): string {
+  function worktreeText(d: { from: string; branch: string; carried: string[]; total: number; selective: boolean; clean: boolean; changes?: FileChange[] }, ink: CardInk): string {
     const head = `🌲 WORKTREE ${ink.hero(`【${d.from} -> ${d.branch}】`)}`;
     if (d.clean) {
       return [head, ...diagramTree([{ head: ink.dim("clean · nothing to carry") }], ink.dim)].join("\n");
@@ -453,7 +454,7 @@ export default function (pi: ExtensionAPI) {
       : d.selective
         ? `carrying ${d.carried.length} of ${d.total} files · ${d.total - d.carried.length} left in origin`
         : `carrying ${count("file", d.carried.length)}`;
-    const rows: DiagramRow[] = [{ head: ink.dim(summary), children: d.carried.map((f) => ink.text(clip(f))) }];
+    const rows: DiagramRow[] = [{ head: ink.dim(summary), children: fileLines(d.changes, d.carried, ink) }];
     return [head, ...diagramTree(rows, ink.dim)].join("\n");
   }
 
@@ -551,7 +552,7 @@ export default function (pi: ExtensionAPI) {
   type CreateResult =
     | {
         ok: true; link: WorktreeLink; branch: string; path: string; carried: boolean; carryNote: string;
-        from: string | null; carriedPaths: string[]; totalDirty: number; selective: boolean; clean: boolean;
+        from: string | null; carriedPaths: string[]; carriedChanges: FileChange[]; totalDirty: number; selective: boolean; clean: boolean;
         bumpedFrom: string | null;
       }
     | { ok: false; reason: string; text: string; link?: WorktreeLink };
@@ -645,9 +646,17 @@ export default function (pi: ExtensionAPI) {
     pi.appendEntry(LINK_ENTRY, link);
     await recordEvent({ kind: "create", ...link });
     const dirtyBefore = porcelainPaths(facts.porcelain);
+    const carriedPaths = selective ? (opts.carryPaths ?? []) : carried ? dirtyBefore : [];
+    // Status letters and line counts for the card come from the changes as they
+    // now sit in the new worktree — the same bytes the carry moved over.
+    const carriedChanges = carried && carriedPaths.length > 0
+      ? await workingChanges(exec, targetPath, carriedPaths)
+      : [];
     return {
       ok: true, link, branch, path: targetPath, carried, carryNote,
-      from: facts.branch, carriedPaths: selective ? (opts.carryPaths ?? []) : carried ? dirtyBefore : [],
+      from: facts.branch,
+      carriedPaths: carriedChanges.length > 0 ? carriedChanges.map((c) => c.path) : carriedPaths,
+      carriedChanges,
       totalDirty: dirtyBefore.length, selective, clean: facts.clean, bumpedFrom,
     };
   }
@@ -1255,6 +1264,7 @@ export default function (pi: ExtensionAPI) {
         content: [{ type: "text", text }],
         details: {
           ok: true, from: r.from, branch: r.branch, carried: r.carriedPaths,
+          changes: r.carriedChanges,
           total: r.totalDirty, selective: r.selective, clean: r.clean,
         },
       };
@@ -1271,7 +1281,7 @@ export default function (pi: ExtensionAPI) {
       if (isPartial) return box(ink.dim("…"));
       const full = (result as { content?: Array<{ text?: unknown }> }).content?.map((b) => (typeof b?.text === "string" ? b.text : "")).filter(Boolean).join("\n") ?? "";
       if (expanded) return box(full);
-      const d = (result as { details?: { ok?: unknown; from?: unknown; branch?: unknown; carried?: unknown; total?: unknown; selective?: unknown; clean?: unknown } }).details ?? {};
+      const d = (result as { details?: { ok?: unknown; from?: unknown; branch?: unknown; carried?: unknown; total?: unknown; selective?: unknown; clean?: unknown; changes?: unknown } }).details ?? {};
       if (d.ok !== true) return box(ink.error(`❌ ${firstLine(full)}`));
       return box(worktreeText({
         from: typeof d.from === "string" ? d.from : "?",
@@ -1280,6 +1290,7 @@ export default function (pi: ExtensionAPI) {
         total: typeof d.total === "number" ? d.total : 0,
         selective: d.selective === true,
         clean: d.clean === true,
+        changes: Array.isArray(d.changes) ? d.changes as FileChange[] : undefined,
       }, ink));
     },
   });
@@ -1461,7 +1472,8 @@ export default function (pi: ExtensionAPI) {
             display: true,
             details: {
               kind: "create", from: r.from ?? facts.branch ?? "?", branch: r.branch,
-              carried: r.carriedPaths, total: r.totalDirty, selective: r.selective, clean: r.clean,
+              carried: r.carriedPaths, changes: r.carriedChanges,
+              total: r.totalDirty, selective: r.selective, clean: r.clean,
             } satisfies CardDetails,
           },
           { triggerTurn: trigger },
@@ -1477,16 +1489,16 @@ export default function (pi: ExtensionAPI) {
       const lines = [
         parsed.task
           ? `User ran /worktree for: "${parsed.task}".`
-          : "User ran /worktree with no task text — infer the pending task from the conversation and the dirty files below. If the workspace is clean and nothing pending is inferable, ask the user in one short question what to work on instead of stalling or inventing a placeholder branch (this exception outranks 'never ask' below).",
+          : "User ran /worktree with no task text — infer the pending task from the conversation and the dirty files below, then create the worktree and do it. Never come back with a question about what to work on: if nothing pending is inferable, still create it and say in one line that it's ready for whatever comes next.",
         `Origin: ${facts.branch ?? "?"} @ ${facts.topLevel}.`,
-        "Isolate the work into a new linked worktree YOURSELF by calling worktree_create — never use raw git worktree commands. Don't ask the user anything unless the no-task exception above applies.",
+        "Isolate the work into a new linked worktree YOURSELF by calling worktree_create — never use raw git worktree commands. Don't ask the user anything — just open the worktree.",
         "1. The dirty files are listed below — triage from this list. Call worktree_status only if you need more (current branch, existing worktrees).",
         parsed.carry
           ? "2. Triage uncommitted changes: carry only files related to this task via `carryPaths`; leave unrelated files untouched in the origin. If everything dirty belongs here, omit `carryPaths` to carry all. If you carry selectively, tell the user in one line which files you left behind and why."
           : "2. The user passed --no-carry: create without carrying any uncommitted changes.",
         parsed.branch
           ? `3. Use branch \`${sanitizeBranchName(parsed.branch) || parsed.branch}\`.`
-          : "3. Name the branch yourself via `branch` — a descriptive name for this work, never a fixed or date-based format.",
+          : "3. Name the branch yourself via `branch` — a descriptive name for this work, never a fixed or date-based format. If no task is inferable, pick a short generic name instead of asking.",
       ];
       if (parsed.base) lines.push(`Base the branch on \`${parsed.base}\`.`);
       if (parsed.path) lines.push(`Create the worktree at \`${parsed.path}\`.`);

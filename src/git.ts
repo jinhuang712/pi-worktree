@@ -342,6 +342,23 @@ export interface CarryResult {
  * worktree via a temporary stash. The stash lives in the shared repo so it
  * is visible from both worktrees. Drops the stash only on clean apply.
  */
+/** Dirty paths in `cwd` not covered by the selected pathspecs; null when git
+ *  cannot be asked (caller falls back to the plain positive pathspecs). */
+async function unrelatedDirtyPaths(
+  exec: ExecFn,
+  cwd: string,
+  selected: string[],
+  signal?: AbortSignal,
+): Promise<string[] | null> {
+  const st = await run(exec, ["status", "--porcelain", "-uall"], cwd, signal);
+  if (st.code !== 0) return null;
+  const covered = (p: string) => selected.some((s) => {
+    const clean = s.replace(/\/+$/, "");
+    return p === clean || p.startsWith(`${clean}/`);
+  });
+  return porcelainPaths(st.stdout).filter((p) => !covered(p));
+}
+
 export async function carryChangesViaStash(
   exec: ExecFn,
   originCwd: string,
@@ -355,7 +372,15 @@ export async function carryChangesViaStash(
   const beforeSha = before.code === 0 ? before.stdout.trim() : "";
   const selective = !!paths?.length;
   const pushArgs = ["stash", "push", "-u", "-m", label];
-  if (selective) pushArgs.push("--", ...paths!);
+  if (selective) {
+    // A positive pathspec naming a *staged deletion* makes `stash push` fail
+    // ("pathspec did not match any files") after printing "Saved …", leaving
+    // an empty stash behind. Carry everything except the files that stay put
+    // instead: exclusions match index and worktree state alike.
+    const kept = await unrelatedDirtyPaths(exec, originCwd, paths!, signal);
+    const scope = kept === null ? paths! : kept.map((p) => `:(exclude,literal)${p}`);
+    pushArgs.push("--", ...scope);
+  }
 
   const push = await run(exec, pushArgs, originCwd, signal);
   const pushOut = `${push.stdout}\n${push.stderr}`.trim();
@@ -550,6 +575,8 @@ export interface FileChange {
   deleted: number | null;
 }
 
+const countOf = (s: string | undefined): number | null => (s !== undefined && /^\d+$/.test(s) ? Number(s) : null);
+
 /** Per-file change rows for `head` vs `base` — status letter plus line counts
  *  (same three-dot range as diffStat/diffNames). */
 export async function diffChanges(exec: ExecFn, cwd: string, base: string, head: string): Promise<FileChange[]> {
@@ -569,10 +596,47 @@ export async function diffChanges(exec: ExecFn, cwd: string, base: string, head:
       status,
       path: ((renamed ? cols[2] : cols[1]) ?? "").trim(),
       from: renamed ? cols[1] : undefined,
-      added: a !== undefined && /^\d+$/.test(a) ? Number(a) : null,
-      deleted: d !== undefined && /^\d+$/.test(d) ? Number(d) : null,
+      added: countOf(a),
+      deleted: countOf(d),
     };
   });
+}
+
+/** Uncommitted changes in `cwd`, optionally restricted to `paths` pathspecs,
+ *  in the same shape as diffChanges. Untracked files count as all-added lines
+ *  (`--no-index` against /dev/null, so binary files still report `-`). */
+export async function workingChanges(exec: ExecFn, cwd: string, paths: string[] = []): Promise<FileChange[]> {
+  const scope = paths.length > 0 ? ["--", ...paths] : [];
+  const [st, num] = await Promise.all([
+    run(exec, ["status", "--porcelain", "-uall", ...scope], cwd),
+    run(exec, ["diff", "--numstat", "HEAD", ...scope], cwd),
+  ]);
+  if (st.code !== 0) return [];
+  const counts = new Map<string, { added: number | null; deleted: number | null }>();
+  for (const line of (num.code === 0 ? num.stdout : "").split("\n")) {
+    if (!line) continue;
+    const [a, d, ...rest] = line.split("\t");
+    counts.set(rest.join("\t").trim(), { added: countOf(a), deleted: countOf(d) });
+  }
+  const out: FileChange[] = [];
+  for (const line of st.stdout.split("\n")) {
+    if (!line) continue;
+    const xy = line.slice(0, 2);
+    const raw = line.slice(3).trim();
+    const path = raw.includes(" -> ") ? (raw.split(" -> ").pop() ?? raw).trim() : raw;
+    const status = xy === "??" ? "A" : (xy.replace(/ /g, "").charAt(0) || "M");
+    let count = counts.get(path);
+    if (xy === "??") {
+      // Untracked files never show up in `diff HEAD`; measure them directly.
+      // Exit 1 just means the two sides differ.
+      const n = await run(exec, ["diff", "--no-index", "--numstat", "--", "/dev/null", path], cwd);
+      const first = n.stdout.split("\n").find(Boolean);
+      const [a, d] = (first ?? "").split("\t");
+      if (first) count = { added: countOf(a), deleted: countOf(d) };
+    }
+    out.push({ status, path, added: count?.added ?? null, deleted: count?.deleted ?? null });
+  }
+  return out;
 }
 
 /** Subject lines of commits in `head` not in `base`, newest first. */

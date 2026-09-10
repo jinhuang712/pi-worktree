@@ -14,6 +14,7 @@ import {
   isWorkTree,
   listWorktrees,
   mergeInto,
+  workingChanges,
   type ExecFn,
 } from "../src/git.ts";
 
@@ -52,6 +53,24 @@ test("a bogus target path is not a worktree and not detached", async () => {
   await sh(origin, ["checkout", "--detach", "HEAD"]);
   assert.equal(await isWorkTree(exec, origin), true);
   assert.equal(await isDetached(exec, origin), true);
+});
+
+test("workingChanges marks modified, untracked and deleted files", async () => {
+  const repo = await initRepo();
+  writeFileSync(join(repo, "b.txt"), "x\ny\n");
+  await sh(repo, ["add", "-A"]);
+  await sh(repo, ["commit", "-m", "add b"]);
+  writeFileSync(join(repo, "a.txt"), "one\ntwo\n");
+  writeFileSync(join(repo, "fresh.txt"), "n1\nn2\n");
+  await sh(repo, ["rm", "-q", "b.txt"]);
+
+  const by = Object.fromEntries((await workingChanges(exec, repo)).map((c) => [c.path, c]));
+  assert.deepEqual(by["a.txt"], { status: "M", path: "a.txt", added: 1, deleted: 0 });
+  assert.deepEqual(by["fresh.txt"], { status: "A", path: "fresh.txt", added: 2, deleted: 0 });
+  assert.deepEqual(by["b.txt"], { status: "D", path: "b.txt", added: 0, deleted: 2 });
+
+  const scoped = await workingChanges(exec, repo, ["a.txt"]);
+  assert.deepEqual(scoped.map((c) => c.path), ["a.txt"]);
 });
 
 test("create + stash-carry + land clean merge", async () => {
@@ -177,6 +196,31 @@ test("selective stash-carry moves only chosen paths", async () => {
   assert.equal((await sh(origin, ["stash", "list"])).out.trim(), "");
   const wtFacts = await collectFacts(exec, wtPath);
   assert.ok(wtFacts && !wtFacts.clean);
+});
+
+test("selective carry survives a staged deletion and leaves the rest behind", async () => {
+  const origin = await initRepo();
+  writeFileSync(join(origin, "b.txt"), "x\ny\n");
+  await sh(origin, ["add", "-A"]);
+  await sh(origin, ["commit", "-m", "add b"]);
+  writeFileSync(join(origin, "a.txt"), "one\ntwo\n"); // modified
+  await sh(origin, ["rm", "-q", "b.txt"]); // staged deletion
+  writeFileSync(join(origin, "keep-out.md"), "leave\n"); // unrelated
+
+  const wtPath = join(`${origin}.worktrees`, "pi-e2e-sel-del");
+  const created = await createWorktree(exec, origin, { branch: "pi/e2e-sel-del", path: wtPath });
+  assert.equal(created.ok, true, created.output);
+
+  const carry = await carryChangesViaStash(exec, origin, wtPath, "pi-worktree:test", undefined, ["a.txt", "b.txt"]);
+  assert.equal(carry.carried, true, JSON.stringify(carry));
+
+  const wt = await sh(wtPath, ["status", "--porcelain", "-uall"]);
+  assert.match(wt.out, / M a\.txt/);
+  assert.match(wt.out, /D\s+b\.txt/);
+  // The unrelated file stays in the origin, and no stash entry leaks.
+  const originSt = await sh(origin, ["status", "--porcelain", "-uall"]);
+  assert.match(originSt.out, /\?\? keep-out\.md/);
+  assert.equal((await sh(origin, ["stash", "list"])).out.trim(), "");
 });
 
 test("diffNames lists files changed on the branch", async () => {

@@ -66,8 +66,8 @@ What you see: exactly one purple card per action, one diagram tree under the `�
 ```text
 🌲 WORKTREE 【main -> wt-http-retry】
    └─ carrying 2 of 5 files · 3 left in origin
-      ├─ src/http.ts
-      └─ test/http.test.ts
+      ├─ U  src/http.ts        +12  -3
+      └─ N  test/http.test.ts  +40  -0
 
 🌲 LAND 【wt-http-retry -> main】 · rebased as a1b2c3d
    ├─ 2 commits
@@ -108,7 +108,7 @@ What you see: exactly one purple card per action, one diagram tree under the `�
 ```
 
 - **The agent names the branch** — no fixed format, no questions asked. Model-chosen collisions auto-bump (`-2`, `-3`). Pass `--branch` to name it yourself: with a clean workspace (or `--no-carry`) that creates immediately with no model roundtrip; a colliding `--branch` stays a hard error so your typos stay visible.
-- **Dirty workspaces are triaged by the agent** — it carries only files related to the task (selective stash via `carryPaths`: `carrying 2 of 5 files · 3 left in origin`) and leaves unrelated changes untouched in the origin, saying in one line what it left behind and why. No confirmation, ever. The stash is dropped only after a clean apply; on conflict the stash is kept and its ref is reported so nothing is lost.
+- **Dirty workspaces are triaged by the agent** — it carries only files related to the task (selective stash via `carryPaths`: `carrying 2 of 5 files · 3 left in origin`, each carried file shown with its `N`/`U`/`D`/`R` status and `+N`/`-N` counts) and leaves unrelated changes untouched in the origin, saying in one line what it left behind and why. No confirmation, ever. The stash is dropped only after a clean apply; on conflict the stash is kept and its ref is reported so nothing is lost. Staged deletions carry correctly — the selection is expressed as exclusions, because a positive pathspec naming a deleted file makes `git stash push` fail.
 - **Clean workspace** — fast path with no stash dance. This is the ideal isolation moment: for experimental, risky, or parallel work, prefer `/worktree` over editing in place.
 - New worktrees default to `<repo>.worktrees/<branch>`, deduplicated with `-2`, `-3`:
 
@@ -128,7 +128,7 @@ What you see: exactly one purple card per action, one diagram tree under the `�
 /worktree --no-carry spike a risky refactor
 ```
 
-After creation the session is **bound** to the worktree: the session name, terminal title and widget show `🌲 <branch>`, and the agent's tool calls run inside it (see below). The agent continues the task there and asks whether to land when done. With no task text and no conversation yet, the worktree is created and Pi waits for you instead of guessing. With conversation history but no task text, the agent infers the task from the conversation and dirty files — or asks you in one short question when the workspace is clean and nothing is inferable, instead of stalling or inventing a placeholder branch. One session owns at most one active worktree per repo — creating again points back at the owned link until it is landed or abandoned.
+After creation the session is **bound** to the worktree: the session name, terminal title and widget show `🌲 <branch>`, and the agent's tool calls run inside it (see below). The agent continues the task there and asks whether to land when done. With conversation history but no task text, the agent infers the task from the conversation and dirty files; when nothing is inferable it still creates the worktree and says it's ready — `/worktree` never comes back with a question about what to work on. Only with no conversation at all does it create silently and wait for you instead of guessing. One session owns at most one active worktree per repo — creating again points back at the owned link until it is landed or abandoned.
 
 ## Session binding — the virtual cwd
 
@@ -293,7 +293,7 @@ One file per link, in the shared git dir, so it survives `cd` and fresh sessions
 
 The TUI widget shows readiness at a glance: `🌲 wt-fix-login → main · fix login retry · ↑3 · ↓1 · 2 dirty` (commits ahead, origin commits behind, uncommitted files), refreshed after every agent run. Origins show their own plus unowned children.
 
-Transcript contract: every pi-worktree action renders exactly one purple block — a caps `LABEL` plus the hero in `【】`, rows hanging off one dim `├─`/`└─`/`│` diagram tree (`WORKTREE`, `LAND`, `LAND CONFLICT`, `ABANDON`, `ERROR`). Every row is listed — no caps — and LAND file rows are a table: status letter, path, `+N`/`-N` (additions green, deletions red, zeros dim), columns padded to the widest cell. No absolute paths, no green/red blocks; full output is one expand away. Cards signal state changes with the smallest effective payload — explanations and decisions belong to the model's own words.
+Transcript contract: every pi-worktree action renders exactly one purple block — a caps `LABEL` plus the hero in `【】`, rows hanging off one dim `├─`/`└─`/`│` diagram tree (`WORKTREE`, `LAND`, `LAND CONFLICT`, `ABANDON`, `ERROR`). Every row is listed — no caps — and file rows (both `WORKTREE` and `LAND`) are a table: status letter, path, `+N`/`-N` (additions green, deletions red, zeros dim), columns padded to the widest cell. No absolute paths, no green/red blocks; full output is one expand away. Cards signal state changes with the smallest effective payload — explanations and decisions belong to the model's own words.
 
 ## Agent tools
 
